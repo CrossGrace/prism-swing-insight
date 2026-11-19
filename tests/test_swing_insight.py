@@ -12,8 +12,9 @@ import pytest
 from swing_insight.analyst import ThesisOpinion, analyze_thesis, validate_opinion
 from swing_insight.journal import PaperPolicy, SwingJournal
 from swing_insight.market import MarketDataUnavailable, evaluate_market, normalized_bars
-from swing_insight.simulator import ReplayPolicy, replay_ticker
-from swing_insight.sources import get_market_snapshots
+from swing_insight.simulator import ReplayPolicy, _rsi, replay_ticker
+from swing_insight.sources import (get_market_snapshots, get_public_research_ohlcv,
+                                   get_public_research_kospi)
 from swing_insight.watchlist import Evidence, WatchItem, load_watchlist
 
 AS_OF = "2026-11-19"
@@ -213,6 +214,15 @@ def replay_fixture():
     return stock, index, days
 
 
+def test_replay_rsi_uses_wilder_smoothed_gains_losses():
+    assert _rsi([100] * 15) == 50.0
+    assert _rsi(list(range(15))) == 100.0
+    # 14 consecutive one-point gains seed avgGain=1, avgLoss=0;
+    # a subsequent one-point loss gives Wilder avgGain=13/14,
+    # avgLoss=1/14, therefore RSI=92.857... (not Cutler RSI).
+    assert _rsi(list(range(15)) + [13]) == pytest.approx(100 * 13 / 14)
+
+
 def test_replay_next_open_and_conservative_stop_collision():
     stock, index, days = replay_fixture()
     test_item = WatchItem("010060", "OCI홀딩스", "LTA", ("계약 악화",), (
@@ -253,6 +263,100 @@ def test_replay_kospi_correction_veto_visible_in_result():
     assert not any(t["signal_date"] == days[74] for t in result["trades"])
     assert any("MARKET_CORRECTION" in event["reason"]
                for event in result["market_guard_rejections"])
+
+
+def test_replay_explicit_bullish_assumption_works_without_index_data():
+    stock, _, days = replay_fixture()
+    test_item = WatchItem("010060", "OCI홀딩스", "LTA", ("계약 악화",), ())
+    result = replay_ticker(item=test_item, stock=stock, index=None,
+                           start=days[70], end=days[-1], price_only=True,
+                           assume_uptrend=True,
+                           policy=ReplayPolicy(90, 2, 3, 5, 3, 10, 20, 0))
+    assert any(t["signal_date"] == days[74] for t in result["trades"])
+    assert result["market_guard"] == "ASSUMED_UPTREND_NOT_VERIFIED"
+    assert result["compounded_net_sleeve_pct"] > 0 or result["count"] >= 1
+
+
+def test_replay_tactical_correction_keeps_prism_state_and_limits_position():
+    stock, index, days = replay_fixture()
+    for i, day in enumerate(days):
+        index[day]["Close"] = 100 - 0.5 * i  # correction, but no one-day panic
+    test_item = WatchItem("010060", "OCI홀딩스", "LTA", ("악화",), ())
+    policy = ReplayPolicy(90, 2, 3, 5, 3, 10, 20, 0)
+    strict = replay_ticker(item=test_item, stock=stock, index=index,
+                           start=days[40], end=days[-1], policy=policy, price_only=True)
+    tactical = replay_ticker(item=test_item, stock=stock, index=index,
+                             start=days[40], end=days[-1], policy=policy,
+                             price_only=True, market_mode="tactical")
+    assert strict["count"] == 0
+    trade = next(t for t in tactical["trades"] if t["signal_date"] == days[74])
+    assert trade["market_state"] == "CORRECTION"
+    assert trade["position_fraction_of_sleeve"] == 0.25
+    assert tactical["compounded_net_sleeve_pct"] < 0  # stop-filled drawdown scaled by 25%
+    assert abs(tactical["compounded_net_sleeve_pct"]) < abs(trade["net_return_pct"])
+
+
+def test_replay_tactical_vetoes_index_panic_and_conflicting_assumption():
+    stock, index, days = replay_fixture()
+    for i, day in enumerate(days):
+        index[day]["Close"] = 100 - 0.5 * i
+    index[days[74]]["Close"] = 45.0  # >4% KOSPI collapse on signal day
+    test_item = WatchItem("010060", "OCI홀딩스", "LTA", ("악화",), ())
+    policy = ReplayPolicy(90, 2, 3, 5, 3, 10, 20, 0)
+    tactical = replay_ticker(item=test_item, stock=stock, index=index,
+                             start=days[40], end=days[-1], policy=policy,
+                             price_only=True, market_mode="tactical")
+    assert not tactical["trades"]
+    assert any("KOSPI_PANIC" in e["reason"] for e in tactical["market_guard_rejections"])
+    with pytest.raises(ValueError, match="conflicting"):
+        replay_ticker(item=test_item, stock=stock, index=index,
+                      start=days[40], end=days[-1], policy=policy, price_only=True,
+                      assume_uptrend=True, market_mode="tactical")
+
+
+@pytest.mark.asyncio
+async def test_public_daily_research_source_trims_old_bars_and_blocks_splits(monkeypatch):
+    stock, _, days = replay_fixture()
+    rows = [[d.replace("-", ""), v["Close"], v["Volume"], v["Open"], v["High"], v["Low"]]
+            for d, v in stock.items()]
+    raw = {"code": "010060", "as_of": days[-1].replace("-", ""),
+           "columns": ["date", "close", "volume", "open", "high", "low"],
+           "rows": rows, "breaks": []}
+
+    async def fake_thread(fn):
+        return raw
+
+    monkeypatch.setattr("swing_insight.sources.asyncio.to_thread", fake_thread)
+    fetched = await get_public_research_ohlcv("010060", days[-1], start=days[35])
+    assert fetched[days[-1]]["Close"] == stock[days[-1]]["Close"]
+    raw["breaks"] = [{"date": days[33].replace("-", "") }]
+    with pytest.raises(ValueError, match="CORPORATE_ACTION"):
+        await get_public_research_ohlcv("010060", days[-1], start=days[35])
+
+
+@pytest.mark.asyncio
+async def test_public_kospi_daily_source_asof_and_volume_contract(monkeypatch):
+    raw = {"code": "KOSPI", "periodType": "dayCandle", "hasVolume": True,
+           "priceInfos": [
+               {"localDate": "20261117", "openPrice": 5008.09, "highPrice": 5084.06,
+                "lowPrice": 4957.0, "closePrice": 4968.48,
+                "accumulatedTradingVolume": 193980000},
+               {"localDate": "20261118", "openPrice": 5100, "highPrice": 5200,
+                "lowPrice": 4900, "closePrice": 5150,
+                "accumulatedTradingVolume": 200000000},
+           ]}
+
+    async def fake_thread(fn):
+        return raw
+
+    monkeypatch.setattr("swing_insight.sources.asyncio.to_thread", fake_thread)
+    result = await get_public_research_kospi("2026-11-17")
+    assert list(result) == ["2026-11-17"]
+    assert result["2026-11-17"]["Close"] == 4968.48
+    assert result["2026-11-17"]["Volume"] == 193980000
+    raw["hasVolume"] = False
+    with pytest.raises(ValueError, match="SCHEMA_CHANGED"):
+        await get_public_research_kospi("2026-11-17")
 
 
 def test_replay_requires_explicit_valid_costs_and_intraday_limit():

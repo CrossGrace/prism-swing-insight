@@ -69,11 +69,21 @@ def _candles(payload: dict[str, Any], end: str) -> list[Candle]:
 
 
 def _rsi(closes: list[float], period: int = 14) -> float | None:
+    """Wilder RSI (RMA smoothing), the common chart-indicator convention.
+
+    Uses only closes available on the signal date. The older last-14-deltas
+    simple-average variant is Cutler RSI and has different signals.
+    """
     if len(closes) <= period:
         return None
-    changes = [closes[i] - closes[i - 1] for i in range(len(closes) - period, len(closes))]
-    gain = sum(max(change, 0) for change in changes) / period
-    loss = sum(max(-change, 0) for change in changes) / period
+    changes = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
+    gain = sum(max(change, 0) for change in changes[:period]) / period
+    loss = sum(max(-change, 0) for change in changes[:period]) / period
+    for change in changes[period:]:
+        gain = (gain * (period - 1) + max(change, 0)) / period
+        loss = (loss * (period - 1) + max(-change, 0)) / period
+    if gain == loss == 0:
+        return 50.0
     return 100.0 if loss == 0 else 100 - 100 / (1 + gain / loss)
 
 
@@ -97,26 +107,32 @@ def _exit_fill(candle: Candle, buy_price: float, policy: ReplayPolicy, hold_days
     return None
 
 
-def replay_ticker(*, item: WatchItem, stock: dict[str, Any], index: dict[str, Any],
-                  start: str, end: str, policy: ReplayPolicy) -> dict[str, Any]:
+def replay_ticker(*, item: WatchItem, stock: dict[str, Any], index: dict[str, Any] | None,
+                  start: str, end: str, policy: ReplayPolicy,
+                  price_only: bool = False, assume_uptrend: bool = False,
+                  market_mode: str = "strict") -> dict[str, Any]:
     """Replay with T-close signals and strictly T+1-open entry.
 
     One position at a time per ticker. Results are per-trade observations, not
     a combined portfolio curve. A dated evidence source gates all earlier bars.
     """
     begin, finish = date.fromisoformat(start), date.fromisoformat(end)
+    if market_mode not in {"strict", "tactical"} or (assume_uptrend and market_mode != "strict"):
+        raise ValueError("Invalid market mode or conflicting forced-uptrend assumption")
     if finish < begin:
         raise ValueError("Replay end precedes start")
-    if not item.evidence:
+    if not item.evidence and not price_only:
         raise ValueError("Replay needs dated fundamental evidence; no hindsight LTA")
     stock_bars = _candles(stock, end)
-    index_bars = normalized_bars(index, as_of=end)
+    index_bars = [] if assume_uptrend else normalized_bars(index, as_of=end)
     index_by_date = {b.date: b for b in index_bars}
+    index_position = {b.date: i for i, b in enumerate(index_bars)}
     stock_dict = {b.date: {"Close": b.close, "Volume": b.volume} for b in stock_bars}
     index_dict = {b.date: {"Close": b.close, "Volume": b.volume} for b in index_bars}
     # The thesis contains *all* current source claims. Conservatively prevent
     # any of them from contaminating an earlier historical decision.
-    eligible_from = max(begin, *(date.fromisoformat(e.as_of) for e in item.evidence))
+    eligible_from = (begin if price_only else max(
+        begin, *(date.fromisoformat(e.as_of) for e in item.evidence)))
     trades = []
     blocked_signals = []
     skip_until = -1
@@ -126,7 +142,9 @@ def replay_ticker(*, item: WatchItem, stock: dict[str, Any], index: dict[str, An
         if i <= skip_until or signal_day < eligible_from or signal_day >= finish:
             continue
         entry = stock_bars[i + 1]
-        if date.fromisoformat(entry.date) > finish or entry.date not in index_by_date:
+        if date.fromisoformat(entry.date) > finish or (
+            not assume_uptrend and entry.date not in index_by_date
+        ):
             continue
         closes = [b.close for b in stock_bars[:i + 1]]
         rsi = _rsi(closes)
@@ -135,17 +153,49 @@ def replay_ticker(*, item: WatchItem, stock: dict[str, Any], index: dict[str, An
                 or signal_bar.close / stock_bars[i - 3].close - 1 > -policy.three_day_dip_pct / 100):
             continue
         # Index must be a confirmed same-session bar; never use future prices.
-        if signal_bar.date not in index_by_date:
-            blocked_signals.append({"date": signal_bar.date, "reason": "MISSING_SAME_DAY_KOSPI"})
-            continue
-        stock_cutoff = {day: data for day, data in stock_dict.items() if day <= signal_bar.date}
-        index_cutoff = {day: data for day, data in index_dict.items() if day <= signal_bar.date}
-        observation = evaluate_market(ticker=item.ticker, as_of=signal_bar.date,
-                                      stock=stock_cutoff, index=index_cutoff)
-        if not observation.new_entries_allowed:
-            blocked_signals.append({"date": signal_bar.date,
-                                    "reason": ",".join(observation.blocking_reasons) or observation.index_state})
-            continue
+        position_fraction = 1.0
+        market_state = "ASSUMED_UPTREND" if assume_uptrend else "UNKNOWN"
+        if not assume_uptrend:
+            if signal_bar.date not in index_by_date:
+                blocked_signals.append({"date": signal_bar.date, "reason": "MISSING_SAME_DAY_KOSPI"})
+                continue
+            stock_cutoff = {day: data for day, data in stock_dict.items() if day <= signal_bar.date}
+            index_cutoff = {day: data for day, data in index_dict.items() if day <= signal_bar.date}
+            observation = evaluate_market(ticker=item.ticker, as_of=signal_bar.date,
+                                          stock=stock_cutoff, index=index_cutoff)
+            market_state = observation.index_state
+            if (observation.source_status != "VERIFIED_DAILY"
+                    or observation.price_date != signal_bar.date
+                    or observation.index_date != signal_bar.date):
+                blocked_signals.append({"date": signal_bar.date,
+                                        "reason": ",".join(observation.blocking_reasons) or "INVALID_MARKET_DATA"})
+                continue
+            if market_mode == "strict" and not observation.new_entries_allowed:
+                blocked_signals.append({"date": signal_bar.date,
+                                        "reason": ",".join(observation.blocking_reasons) or observation.index_state})
+                continue
+            if market_mode == "tactical":
+                # PRISM's trend classifier is retained, but tactical RSI reversals
+                # may trade corrections at a smaller equity allocation. Reject
+                # exceptionally sharp index selloffs; these are deliberately
+                # fixed research assumptions, not optimized against the replay.
+                idx = index_position[signal_bar.date]
+                if idx < 3:
+                    blocked_signals.append({"date": signal_bar.date,
+                                            "reason": "INSUFFICIENT_KOSPI_PANIC_HISTORY"})
+                    continue
+                index_change_1d = index_bars[idx].close / index_bars[idx - 1].close - 1
+                index_change_3d = index_bars[idx].close / index_bars[idx - 3].close - 1
+                if index_change_1d <= -0.04 or index_change_3d <= -0.08:
+                    blocked_signals.append({"date": signal_bar.date,
+                                            "reason": "KOSPI_PANIC_DAILY_4PCT_OR_3DAY_8PCT"})
+                    continue
+                position_fraction = {"UPTREND": 1.0, "UNDER_PRESSURE": 0.5,
+                                     "CORRECTION": 0.25}.get(market_state, 0.0)
+                if position_fraction == 0:
+                    blocked_signals.append({"date": signal_bar.date,
+                                            "reason": "UNKNOWN_PRISM_MARKET_STATE"})
+                    continue
         buy = entry.open * (1 + policy.slippage_bps / 10000)
         for hold in range(policy.max_hold_days + 1):
             exit_idx = i + 1 + hold
@@ -163,6 +213,8 @@ def replay_ticker(*, item: WatchItem, stock: dict[str, Any], index: dict[str, An
             exit_cash = sell * (1 - (policy.fee_bps + policy.sell_tax_bps) / 10000)
             trades.append({"signal_date": signal_bar.date, "entry_date": entry.date,
                            "exit_date": exit_bar.date, "hold_days": hold,
+                           "market_state": market_state,
+                           "position_fraction_of_sleeve": position_fraction,
                            "rsi14_signal": round(rsi, 2), "entry_price": round(buy, 3),
                            "exit_price": round(sell, 3), "exit_reason": reason,
                            "net_return_pct": round((exit_cash / entry_cash - 1) * 100, 4)})
@@ -173,14 +225,32 @@ def replay_ticker(*, item: WatchItem, stock: dict[str, Any], index: dict[str, An
             # data is open; never invent the future close or count a win.
             skip_until = len(stock_bars)
     returns = [t["net_return_pct"] for t in trades]
+    # Idle sleeve capital remains cash; tactical sizing must affect the
+    # *portfolio* return, not just annotate a hypothetical full-size fill.
+    multiplier = math.prod(1 + t["position_fraction_of_sleeve"] * t["net_return_pct"] / 100
+                           for t in trades)
+    window = [b for b in stock_bars if begin <= date.fromisoformat(b.date) <= finish]
+    if not window:
+        raise ValueError("No market sessions found in the requested replay window")
     return {"ticker": item.ticker, "company": item.company,
             "requested_start": start, "end": end, "eligible_from": eligible_from.isoformat(),
-            "evidence_gate": "NO_SIGNAL_BEFORE_LATEST_DATED_EVIDENCE",
-            "signal": "RSI14_DIP_REVERSAL_NOT_MSI", "model": asdict(policy),
+            "evidence_gate": ("DISABLED_PRICE_ONLY_NO_FUNDAMENTAL_FILTER" if price_only else
+                              "NO_SIGNAL_BEFORE_LATEST_DATED_EVIDENCE"),
+            "market_guard": ("ASSUMED_UPTREND_NOT_VERIFIED" if assume_uptrend else
+                             "PRISM_MARKET_PULSE_TACTICAL_SIZED" if market_mode == "tactical" else
+                             "PRISM_MARKET_PULSE_STRICT"),
+            "tactical_risk_rule": ("SLEEVE_UPTREND_100_UNDER_PRESSURE_50_CORRECTION_25;"
+                                   "KOSPI_PANIC_1DAY_MINUS4_3DAY_MINUS8"
+                                   if market_mode == "tactical" else None),
+            "signal": "RSI14_DIP_REVERSAL", "model": asdict(policy),
             "trades": trades, "count": len(trades),
             "market_guard_rejections": blocked_signals,
             "win_rate_pct": round(100 * sum(r > 0 for r in returns) / len(returns), 2)
                             if returns else None,
             "mean_net_trade_pct": round(sum(returns) / len(returns), 3) if returns else None,
             "worst_net_trade_pct": min(returns) if returns else None,
+            "compounded_net_sleeve_pct": round((multiplier - 1) * 100, 3),
+            "buyhold_close_to_close_pct": round((window[-1].close / window[0].close - 1) * 100, 3),
+            "buyhold_first_date": window[0].date,
+            "buyhold_last_date": window[-1].date,
             "status": "COMPLETE_RESEARCH_REPLAY_NOT_REALIZED_RETURNS"}
