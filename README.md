@@ -19,6 +19,8 @@
 
 # PRISM-INSIGHT
 
+> **Fork experiment — 0–3 session swings for OCI Holdings and LS ELECTRIC:** Isolated MCP research, optional OpenAI thesis reviews and conservative daily-bar replay; [Korean setup guide](docs/SWING_INSIGHT_OCI_LS_MVP_ko.md). No live-order integration.
+
 [![GitHub Sponsors](https://img.shields.io/github/sponsors/dragon1086?style=for-the-badge&logo=github-sponsors&color=ff69b4&label=Sponsors)](https://github.com/sponsors/dragon1086)
 [![Stars](https://img.shields.io/github/stars/dragon1086/prism-insight?style=for-the-badge)](https://github.com/dragon1086/prism-insight/stargazers)
 
