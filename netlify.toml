@@ -1,0 +1,10 @@
+"$schema" = "https://open-api.netlify.com/netlify.schema.json"
+
+[build]
+  command = "python3 tools/build_swing_dashboard.py"
+  publish = "dist/swing-dashboard"
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Robots-Tag = "noindex, nofollow"

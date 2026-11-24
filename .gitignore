@@ -207,3 +207,5 @@ prism-btc/backtest/results_*/
 *.sqlite.init.lock
 *.btc-execution.lock
 shadow_lifecycle_state.json
+
+.netlify/
