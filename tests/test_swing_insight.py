@@ -235,6 +235,30 @@ def test_replay_next_open_and_conservative_stop_collision():
     assert t["exit_date"] == days[75] and t["hold_days"] == 0
     assert t["exit_reason"] == "STOP_FIRST_OR_COLLISION"
     assert t["net_return_pct"] < -3
+    assert result["open_position"] is None
+    assert result["marked_net_sleeve_pct"] == result["compounded_net_sleeve_pct"]
+
+
+def test_replay_keeps_final_session_entry_open_and_marks_its_value():
+    stock, _, days = replay_fixture()
+    stock[days[75]] = {"Open": 92, "High": 94, "Low": 91, "Close": 93, "Volume": 1000}
+    item = WatchItem("010060", "OCI홀딩스", "LTA", ("계약 악화",), ())
+    policy = ReplayPolicy(90, 2, 3, 5, 3, 10, 20, 10)
+
+    result = replay_ticker(item=item, stock=stock, index=None, start=days[40],
+                           end=days[75], policy=policy, price_only=True, assume_uptrend=True)
+
+    assert result["trades"] == []
+    assert result["count"] == 0 and result["win_rate_pct"] is None
+    assert result["compounded_net_sleeve_pct"] == 0
+    position = result["open_position"]
+    assert position["signal_date"] == days[74]
+    assert position["entry_date"] == position["mark_date"] == days[75]
+    assert position["entry_price"] == pytest.approx(92 * 1.001)
+    assert position["mark_close"] == 93
+    expected = 100 * (93 * 0.999 * 0.997 / (92 * 1.001 * 1.001) - 1)
+    assert position["marked_net_return_pct"] == round(expected, 4)
+    assert result["marked_net_sleeve_pct"] == round(expected, 3)
 
 
 def test_replay_fundamental_date_gate_and_missing_ohlc_fail_closed():

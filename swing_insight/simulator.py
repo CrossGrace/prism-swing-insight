@@ -134,6 +134,7 @@ def replay_ticker(*, item: WatchItem, stock: dict[str, Any], index: dict[str, An
     eligible_from = (begin if price_only else max(
         begin, *(date.fromisoformat(e.as_of) for e in item.evidence)))
     trades = []
+    open_position = None
     blocked_signals = []
     skip_until = -1
     for i in range(30, len(stock_bars) - 1):
@@ -197,38 +198,42 @@ def replay_ticker(*, item: WatchItem, stock: dict[str, Any], index: dict[str, An
                                             "reason": "UNKNOWN_PRISM_MARKET_STATE"})
                     continue
         buy = entry.open * (1 + policy.slippage_bps / 10000)
-        for hold in range(policy.max_hold_days + 1):
-            exit_idx = i + 1 + hold
-            if exit_idx >= len(stock_bars):
-                break
+        entry_cash = buy * (1 + policy.fee_bps / 10000)
+        sell_slippage = 1 - policy.slippage_bps / 10000
+        sell_cost = 1 - (policy.fee_bps + policy.sell_tax_bps) / 10000
+        position = {"signal_date": signal_bar.date, "entry_date": entry.date,
+                    "market_state": market_state, "position_fraction_of_sleeve": position_fraction,
+                    "rsi14_signal": round(rsi, 2), "entry_price": round(buy, 3)}
+        last_exit_idx = min(i + 1 + policy.max_hold_days, len(stock_bars) - 1)
+        for exit_idx in range(i + 1, last_exit_idx + 1):
             exit_bar = stock_bars[exit_idx]
-            if date.fromisoformat(exit_bar.date) > finish:
-                break
+            hold = exit_idx - i - 1
             outcome = _exit_fill(exit_bar, buy, policy, hold)
             if outcome is None:
                 continue
             exit_reference, reason = outcome
-            sell = exit_reference * (1 - policy.slippage_bps / 10000)
-            entry_cash = buy * (1 + policy.fee_bps / 10000)
-            exit_cash = sell * (1 - (policy.fee_bps + policy.sell_tax_bps) / 10000)
-            trades.append({"signal_date": signal_bar.date, "entry_date": entry.date,
-                           "exit_date": exit_bar.date, "hold_days": hold,
-                           "market_state": market_state,
-                           "position_fraction_of_sleeve": position_fraction,
-                           "rsi14_signal": round(rsi, 2), "entry_price": round(buy, 3),
+            sell = exit_reference * sell_slippage
+            trades.append({**position, "exit_date": exit_bar.date, "hold_days": hold,
                            "exit_price": round(sell, 3), "exit_reason": reason,
-                           "net_return_pct": round((exit_cash / entry_cash - 1) * 100, 4)})
+                           "net_return_pct": round((sell * sell_cost / entry_cash - 1) * 100, 4)})
             skip_until = exit_idx
             break
         else:
-            # A position whose full holding window extends past available
-            # data is open; never invent the future close or count a win.
-            skip_until = len(stock_bars)
+            # The entry happened, but the position has no exit in the observed window.
+            mark = stock_bars[-1]
+            open_position = {**position, "mark_date": mark.date, "mark_close": mark.close,
+                             "marked_net_return_pct": round(
+                                 (mark.close * sell_slippage * sell_cost / entry_cash - 1) * 100, 4)}
+            break
     returns = [t["net_return_pct"] for t in trades]
     # Idle sleeve capital remains cash; tactical sizing must affect the
     # *portfolio* return, not just annotate a hypothetical full-size fill.
     multiplier = math.prod(1 + t["position_fraction_of_sleeve"] * t["net_return_pct"] / 100
                            for t in trades)
+    marked_multiplier = multiplier
+    if open_position is not None:
+        marked_multiplier *= 1 + (open_position["position_fraction_of_sleeve"]
+                                  * open_position["marked_net_return_pct"] / 100)
     window = [b for b in stock_bars if begin <= date.fromisoformat(b.date) <= finish]
     if not window:
         raise ValueError("No market sessions found in the requested replay window")
@@ -243,13 +248,14 @@ def replay_ticker(*, item: WatchItem, stock: dict[str, Any], index: dict[str, An
                                    "KOSPI_PANIC_1DAY_MINUS4_3DAY_MINUS8"
                                    if market_mode == "tactical" else None),
             "signal": "RSI14_DIP_REVERSAL", "model": asdict(policy),
-            "trades": trades, "count": len(trades),
+            "trades": trades, "count": len(trades), "open_position": open_position,
             "market_guard_rejections": blocked_signals,
             "win_rate_pct": round(100 * sum(r > 0 for r in returns) / len(returns), 2)
                             if returns else None,
             "mean_net_trade_pct": round(sum(returns) / len(returns), 3) if returns else None,
             "worst_net_trade_pct": min(returns) if returns else None,
             "compounded_net_sleeve_pct": round((multiplier - 1) * 100, 3),
+            "marked_net_sleeve_pct": round((marked_multiplier - 1) * 100, 3),
             "buyhold_close_to_close_pct": round((window[-1].close / window[0].close - 1) * 100, 3),
             "buyhold_first_date": window[0].date,
             "buyhold_last_date": window[-1].date,

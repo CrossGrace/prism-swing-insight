@@ -73,9 +73,12 @@ function draw() {
   const inset = {left: 64, right: 48, top: 37, bottom: 42};
   const last = prices.length - 1;
   const series = prices.map((day) => day.close);
-  const step = Math.max(1000, 1000 * Math.ceil((Math.max(...series) - Math.min(...series)) / 6000));
-  const lower = Math.floor((Math.min(...series) - 1) / step) * step;
-  const upper = Math.ceil((Math.max(...series) + 1) / step) * step;
+  const plotted = [...series, ...fills.map((fill) => fill.price)];
+  const min = Math.min(...plotted);
+  const max = Math.max(...plotted);
+  const step = Math.max(1000, 1000 * Math.ceil((max - min) / 6000));
+  const lower = Math.floor((min - 1) / step) * step;
+  const upper = Math.ceil((max + 1) / step) * step;
   const x = (i) => inset.left + i / Math.max(last, 1) * (width - inset.left - inset.right);
   const y = (value) => inset.top + (upper - value) / (upper - lower) * (height - inset.top - inset.bottom);
   const positions = new Map(prices.map((day, i) => [day.date, i]));
@@ -121,20 +124,24 @@ function draw() {
   const layer = el("markers");
   const prior = document.activeElement?.dataset.marker;
   layer.replaceChildren();
+  const fillCounts = new Map();
+  for (const {date} of fills) fillCounts.set(date, (fillCounts.get(date) ?? 0) + 1);
   for (const fill of fills) {
     const i = positions.get(fill.date);
     if (i === undefined) continue;
-    const stem = y(series[i]);
-    const top = stem + (fill.side === "buy" ? 20 : -20);
+    const stem = y(fill.price);
+    const top = stem + (fill.side === "buy" ? 18 : -18);
+    const offset = fillCounts.get(fill.date) > 1 ? (fill.side === "buy" ? -14 : 14) : 0;
+    const markerX = x(i) + offset;
     ctx.lineWidth = 1;
     ctx.strokeStyle = color(fill.side === "buy" ? "--buy" : "--sell");
     ctx.beginPath();
     ctx.moveTo(x(i), stem);
-    ctx.lineTo(x(i), top);
+    ctx.lineTo(markerX, top);
     ctx.stroke();
     const marker = node("button", fill.side === "buy" ? "↑" : "↓", `marker ${fill.side}`);
     marker.type = "button";
-    marker.style.left = `${x(i)}px`;
+    marker.style.left = `${markerX}px`;
     marker.style.top = `${top}px`;
     marker.dataset.marker = fill.id;
     marker.setAttribute("aria-label", `${fill.date} ${fill.label} ${currency.format(fill.price)}`);
@@ -179,7 +186,8 @@ function renderRules(scenario) {
     ["진입", `Wilder RSI(14) ≤ ${model.rsi_ceiling} · 3거래일 등락률 ≤ −${model.three_day_dip_pct}% · 당일 종가 반등`],
     ["시장 조건", el("mode").value === "strict" ? "실제 코스피 일봉으로 프리즘 시장 상태 계산 · 상승장에서만 신규 진입" : "비교용 시나리오 · 코스피를 상승장으로 가정"],
     ["청산", `손절 −${model.stop_loss_pct}% · 익절 +${model.take_profit_pct}% · 최대 보유 ${model.max_hold_days}거래일`],
-    ["일봉 체결", "같은 날 손절·익절이 모두 닿으면 손절 우선. 갭 하락은 시가, 익절 갭 상승은 목표가 기준."],
+    ["일봉 체결", "시가 진입 후 당일 청산 가능. 손절·익절이 모두 닿으면 손절 우선. 갭 하락은 시가, 익절 갭 상승은 목표가 기준."],
+    ["종료일 보유", "미청산 매수는 종료일 종가로 평가하고 가정한 매도 비용을 차감합니다. 완료 거래와 승률에는 포함하지 않습니다."],
     ["비용 가정", `수수료 편도 ${model.fee_bps}bp · 매도세 ${model.sell_tax_bps}bp · 슬리피지 편도 ${model.slippage_bps}bp`],
     ["투입·수량", "종목별 한 포지션을 가정. 가상 체결은 주당 가격으로 기록하며 주문 수량·총 금액은 기록하지 않음."],
     ["재생 범위", "가격과 거래량 기반의 과거 연구 재생. LLM 판단, 분할 주문, 증권사 체결은 포함하지 않음."],
@@ -196,14 +204,25 @@ function render() {
   const scenario = instrument.variants[el("mode").value];
   prices = instrument.prices;
   el("chart-title").textContent = `${instrument.name} 일봉 가격 흐름`;
-  fills = scenario.trades.flatMap((trade, i) => [{
-    id: `${i}-buy`, date: trade.entry_date, side: "buy", label: "매수",
-    price: trade.entry_price, reason: `다음 거래일 시가 · 신호일 RSI ${trade.rsi14_signal}`,
-  }, {
-    id: `${i}-sell`, date: trade.exit_date, side: "sell", label: "매도",
-    price: trade.exit_price, reason: exits[trade.exit_reason] ?? trade.exit_reason, net: trade.net_return_pct,
-  }]).sort((a, b) => a.date.localeCompare(b.date));
-  metric("result", scenario.compounded_net_sleeve_pct);
+  const entryFill = (trade, id, status) => ({
+    id, date: trade.entry_date, side: "buy", label: "매수",
+    price: trade.entry_price,
+    reason: `${trade.signal_date} 종가 신호 · 다음 거래일 시가 진입${status}`,
+  });
+  fills = scenario.trades.flatMap((trade, i) => [
+    entryFill(trade, `${i}-buy`, ""),
+    {
+      id: `${i}-sell`, date: trade.exit_date, side: "sell", label: "매도",
+      price: trade.exit_price, net: trade.net_return_pct,
+      reason: `${trade.entry_date === trade.exit_date ? "당일 청산 · " : ""}${exits[trade.exit_reason] ?? trade.exit_reason}`,
+    },
+  ]);
+  if (scenario.open_position) {
+    const position = scenario.open_position;
+    fills.push(entryFill(position, "open-buy", ` · 종료일 미청산 · 평가 ${percent(position.marked_net_return_pct)}`));
+  }
+  fills.sort((a, b) => a.date.localeCompare(b.date));
+  metric("result", scenario.marked_net_sleeve_pct ?? scenario.compounded_net_sleeve_pct);
   metric("benchmark", scenario.buyhold_close_to_close_pct);
   el("count").textContent = `${scenario.count}건`;
   el("win").textContent = scenario.win_rate_pct == null ? "—" : `${scenario.win_rate_pct.toFixed(0)}%`;
