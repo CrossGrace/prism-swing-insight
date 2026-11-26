@@ -1,0 +1,63 @@
+{
+  "protocol": "PRISM_OCI_BLIND_SCALE_20261127_v1",
+  "status": "LOCKED_FOR_HOLDOUT",
+  "baseline_commit": "4eba79d5ce43d3d531425f1e438f49cf7b2874f8",
+  "code_sha256": {
+    "tools/replay_swing_scale_validation.py": "278540c3365c26405a7e547fc5c0b5a81ded106361b5e392551b99fe8023e48d",
+    "tools/replay_swing_scale.py": "bd4a23d805de401f82c117c4b09a98f45c4bc5d433a98b7e65369c26d7dc86ed",
+    "swing_insight/scale_replay.py": "9b06f0a945630311b0e8fab43cd7a5d62fb2c4e851366835e2aab009cd6ca609",
+    "swing_insight/simulator.py": "92cb037d920ff8946076a1bccbc637cb541e19e8a73f96e10eacfa04cd6a39f5",
+    "swing_insight/market.py": "b410c8e7b3c8e67a6f6850625add7ee86419c0c27ec23aed531e96cc8e05faff",
+    "swing_insight/watchlist.py": "a2f3923a7e094d5d47dd36f8e7afb9af9a164e67620561e1fa85cb592183c407",
+    "cores/market_pulse.py": "806f20625ffb8b0cd4f1331a4176c02c6623346b8ee8c914c0c752c3636dcc9e"
+  },
+  "input_sha256": {
+    "dev": "7d1848066b8d5182a56ec5dee7f153c3ee12011109e8635696f7b2aefded1243",
+    "walk": "2e15afa2a1562e82f8dfffb6065c15539ce6a6ebe091eea25bb6ba21304de479",
+    "holdout": "72d6bf8021c67754e49cd3ddb66b75f071d9c451f888688f239486bd0f5caac0"
+  },
+  "holdout": [
+    "2025-09-01",
+    "2026-06-16"
+  ],
+  "execution": {
+    "policy": {
+      "rsi_ceiling": 45,
+      "three_day_dip_pct": 2,
+      "stop_loss_pct": 3,
+      "take_profit_pct": 5,
+      "max_hold_days": 3,
+      "fee_bps": 10,
+      "sell_tax_bps": 20,
+      "slippage_bps": 10
+    },
+    "trade_through_pct": 0.0
+  },
+  "baseline": {
+    "policy_id": "baseline",
+    "scale": {
+      "entry_parts": 1,
+      "entry_gap_pct": 0.4,
+      "entry_weights": "equal",
+      "entry_mode": "limit",
+      "exit_parts": 2,
+      "exit_gap_pct": 0.75,
+      "exit_weights": "equal",
+      "trail_pct": 5.0
+    }
+  },
+  "candidate": {
+    "policy_id": "entry-7-0.4-equal-confirmed/exit-2-0.75-equal-2.5",
+    "scale": {
+      "entry_parts": 7,
+      "entry_gap_pct": 0.4,
+      "entry_weights": "equal",
+      "entry_mode": "confirmed",
+      "exit_parts": 2,
+      "exit_gap_pct": 0.75,
+      "exit_weights": "equal",
+      "trail_pct": 2.5
+    }
+  },
+  "min_paired": 20
+}

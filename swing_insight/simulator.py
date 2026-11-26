@@ -182,6 +182,27 @@ def _entry_today(pending: list[PendingEntry], i: int, bar: Candle, previous: Can
     return None
 
 
+def _signal_rsi(closes: list[float], policy: ReplayPolicy,
+                recovery: RecoveryPolicy | None) -> float | None:
+    rsi = _rsi(closes)
+    change = closes[-1] / closes[-2] - 1
+    if (rsi is None or rsi > policy.rsi_ceiling
+            or (change >= 0 if recovery else change <= 0)
+            or (recovery and change > -recovery.min_daily_drop_pct / 100)
+            or closes[-1] / closes[-4] - 1 > -policy.three_day_dip_pct / 100):
+        return None
+    return rsi
+
+
+def _tactical_fraction(state: str, closes: list[float]) -> tuple[float, str | None]:
+    if len(closes) < 4:
+        return 0.0, "INSUFFICIENT_KOSPI_PANIC_HISTORY"
+    if closes[-1] / closes[-2] - 1 <= -0.04 or closes[-1] / closes[-4] - 1 <= -0.08:
+        return 0.0, "KOSPI_PANIC_DAILY_4PCT_OR_3DAY_8PCT"
+    fraction = {"UPTREND": 1.0, "UNDER_PRESSURE": 0.5, "CORRECTION": 0.25}.get(state, 0.0)
+    return fraction, None if fraction else "UNKNOWN_PRISM_MARKET_STATE"
+
+
 def replay_ticker(*, item: WatchItem, stock: dict[str, Any], index: dict[str, Any] | None,
                   start: str, end: str, policy: ReplayPolicy,
                   price_only: bool = False, assume_uptrend: bool = False,
@@ -272,12 +293,8 @@ def replay_ticker(*, item: WatchItem, stock: dict[str, Any], index: dict[str, An
             continue
         if signal_day < eligible_from:
             continue
-        rsi = _rsi(closes)
-        change = signal_bar.close / previous.close - 1
-        if (rsi is None or rsi > policy.rsi_ceiling
-                or (change >= 0 if recovery else change <= 0)
-                or (recovery and change > -recovery.min_daily_drop_pct / 100)
-                or signal_bar.close / stock_bars[i - 3].close - 1 > -policy.three_day_dip_pct / 100):
+        rsi = _signal_rsi(closes, policy, recovery)
+        if rsi is None:
             continue
         # Index must be a confirmed same-session bar; never use future prices.
         position_fraction = 1.0
@@ -307,21 +324,10 @@ def replay_ticker(*, item: WatchItem, stock: dict[str, Any], index: dict[str, An
                 # exceptionally sharp index selloffs; these are deliberately
                 # fixed research assumptions, not optimized against the replay.
                 idx = index_position[signal_bar.date]
-                if idx < 3:
-                    blocked_signals.append({"date": signal_bar.date,
-                                            "reason": "INSUFFICIENT_KOSPI_PANIC_HISTORY"})
-                    continue
-                index_change_1d = index_bars[idx].close / index_bars[idx - 1].close - 1
-                index_change_3d = index_bars[idx].close / index_bars[idx - 3].close - 1
-                if index_change_1d <= -0.04 or index_change_3d <= -0.08:
-                    blocked_signals.append({"date": signal_bar.date,
-                                            "reason": "KOSPI_PANIC_DAILY_4PCT_OR_3DAY_8PCT"})
-                    continue
-                position_fraction = {"UPTREND": 1.0, "UNDER_PRESSURE": 0.5,
-                                     "CORRECTION": 0.25}.get(market_state, 0.0)
-                if position_fraction == 0:
-                    blocked_signals.append({"date": signal_bar.date,
-                                            "reason": "UNKNOWN_PRISM_MARKET_STATE"})
+                position_fraction, rejection = _tactical_fraction(
+                    market_state, [bar.close for bar in index_bars[max(0, idx - 3):idx + 1]])
+                if rejection:
+                    blocked_signals.append({"date": signal_bar.date, "reason": rejection})
                     continue
         pending.append(PendingEntry(i, signal_bar.date, market_state, position_fraction, rsi))
     if position is not None:
