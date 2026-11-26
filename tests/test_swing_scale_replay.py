@@ -112,3 +112,28 @@ def test_boundary_embargo_prevents_pending_or_overlapping_holding():
     assert _replay(days, stock, market)["trade_count"] == 0
     with pytest.raises(ValueError, match="FINAL_HOLDOUT_LOCKED"):
         window_data(Path("/should-not-be-read"), "2025-09-01")
+
+
+def test_entry_grid_is_fixed_and_does_not_change_exit_rules():
+    from collections import Counter
+
+    from tools.replay_swing_scale import entry_candidates
+
+    candidates = entry_candidates()
+    assert candidates.pop("baseline") == ScalePolicy()
+    assert len(candidates) == len(set(candidates.values())) == 32
+    assert Counter(policy.entry_parts for policy in candidates.values()) == {2: 8, 3: 8, 5: 8, 7: 8}
+    assert all(
+        (p.exit_parts, p.exit_gap_pct, p.exit_weights, p.trail_pct) == (2, 0.75, "equal", 5.0)
+        for p in candidates.values()
+    )
+
+
+def test_entry_study_ties_use_drawdown_fill_count_then_id():
+    from tools.replay_swing_scale import rank_key
+
+    first = dict(net_pct=3, mdd_pct=4, fill_count=7, policy_id="c")
+    assert rank_key(first) < rank_key({**first, "net_pct": 2.99})
+    assert rank_key(first) < rank_key({**first, "mdd_pct": 4.1})
+    assert rank_key(first) < rank_key({**first, "fill_count": 8})
+    assert rank_key(first) < rank_key({**first, "policy_id": "d"})
