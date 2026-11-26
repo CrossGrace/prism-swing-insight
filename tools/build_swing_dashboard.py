@@ -4,6 +4,7 @@ import asyncio
 from datetime import date, datetime, time, timedelta
 import json
 from pathlib import Path
+import re
 import shutil
 import sys
 from urllib.parse import urlencode
@@ -32,7 +33,10 @@ def get_naver_stock_tail(ticker: str, start: str, end: str) -> dict:
     url = f"https://fchart.stock.naver.com/sise.nhn?{queries}"
     with urlopen(Request(url, headers={"User-Agent": "PRISM-swing-insight-research/0.1"}),
                  timeout=15) as response:
-        chart = ElementTree.fromstring(response.read()).find(".//chart")
+        payload = response.read()
+    declaration = re.match(rb"""<\?xml[^>]*encoding=["']([a-zA-Z0-9_-]+)["']""", payload, re.IGNORECASE)
+    encoding = declaration[1].decode("ascii") if declaration else "utf-8-sig"
+    chart = ElementTree.fromstring(payload.decode(encoding)).find(".//chart")
     if chart is None or chart.get("symbol") != ticker:
         raise ValueError(f"Naver returned no matching stock chart: {ticker}")
     rows = {}
