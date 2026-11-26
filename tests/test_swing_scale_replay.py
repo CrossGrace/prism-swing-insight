@@ -137,3 +137,36 @@ def test_entry_study_ties_use_drawdown_fill_count_then_id():
     assert rank_key(first) < rank_key({**first, "mdd_pct": 4.1})
     assert rank_key(first) < rank_key({**first, "fill_count": 8})
     assert rank_key(first) < rank_key({**first, "policy_id": "d"})
+
+
+def test_exit_grid_keeps_each_saved_entry_and_baseline():
+    from collections import Counter
+    from dataclasses import replace
+
+    from tools.replay_swing_scale import exit_candidates
+
+    entries = {"baseline": ScalePolicy(),
+               **{f"entry-{n}": ScalePolicy(entry_parts=n, entry_mode="confirmed")
+                  for n in (2, 3, 5, 7)}}
+    candidates = exit_candidates(entries)
+    assert len(candidates) == 165
+    assert candidates.pop("baseline") == entries["baseline"]
+    assert Counter(p.entry_parts for p in candidates.values()) == {1: 32, 2: 33, 3: 33, 5: 33, 7: 33}
+    expected = {(n, gap, weights, trail) for n in (2, 3, 5, 7) for gap in (0.75, 1.5)
+                for weights in ("equal", "front") for trail in (2.5, 5.0)}
+    for entry_id, entry in entries.items():
+        variants = [p for key, p in candidates.items()
+                    if key.startswith(entry_id + "/") and not key.endswith("/exit-default")]
+        assert {(p.exit_parts, p.exit_gap_pct, p.exit_weights, p.trail_pct)
+                for p in variants} == expected
+        assert all(replace(p, exit_parts=2, exit_gap_pct=0.75, exit_weights="equal", trail_pct=5.0)
+                   == entry for p in variants)
+
+
+def test_exit_grid_rejects_modified_entry_study(tmp_path):
+    from tools.replay_swing_scale import read_entry_representatives
+
+    result = tmp_path / "modified.json"
+    result.write_text('{"exit_study_entries": []}')
+    with pytest.raises(ValueError, match="ENTRY_STUDY_RESULT_HASH_MISMATCH"):
+        read_entry_representatives(result)
