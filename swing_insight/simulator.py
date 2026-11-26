@@ -107,11 +107,85 @@ def _exit_fill(candle: Candle, buy_price: float, policy: ReplayPolicy, hold_days
     return None
 
 
+@dataclass(frozen=True)
+class RecoveryPolicy:
+    wait_sessions: int = 2
+    first_sale_fraction: float = 0.5
+    trail_pct: float = 5.0
+    gap_entry: bool = False
+
+    def __post_init__(self) -> None:
+        if (type(self.wait_sessions) is not int or not 1 <= self.wait_sessions <= 2
+                or not 0 < self.first_sale_fraction < 1 or not 0 < self.trail_pct < 100):
+            raise ValueError("Invalid recovery research policy")
+
+
+def _recovery_sales_today(bar: Candle, hold: int, buy: float, entry_at_open: bool,
+                          stop: float, remaining: float, policy: ReplayPolicy,
+                          recovery: RecoveryPolicy
+                          ) -> tuple[list[tuple[float, str, float]], float]:
+    """Process one observed bar using the stop known before that session."""
+    hard_stop = buy * (1 - policy.stop_loss_pct / 100)
+    target = buy * (1 + policy.take_profit_pct / 100)
+    if hold and bar.open <= stop:
+        return [(bar.open, "TRAIL_GAP" if stop > hard_stop else "STOP_GAP", remaining)], stop
+    sales = []
+    if hold and remaining == 1 and bar.open >= target:
+        sales.append((target, "PARTIAL_TAKE", recovery.first_sale_fraction))
+        remaining -= recovery.first_sale_fraction
+    if bar.low <= stop:
+        if hold == 0 and not entry_at_open:
+            reason = "ENTRY_BAR_STOP_ASSUMED"
+        elif remaining == 1 and bar.high >= target:
+            reason = "STOP_COLLISION"
+        else:
+            reason = "TRAIL_STOP" if stop > hard_stop else "STOP"
+        sales.append((stop, reason, remaining))
+        return sales, stop
+    if remaining == 1 and bar.high >= target:
+        sales.append((target, "PARTIAL_TAKE", recovery.first_sale_fraction))
+        remaining -= recovery.first_sale_fraction
+    if hold == policy.max_hold_days:
+        sales.append((bar.close, "TIME_EXIT", remaining))
+    elif remaining < 1:
+        stop = max(stop, bar.close * (1 - recovery.trail_pct / 100))
+    return sales, stop
+
+
+@dataclass(frozen=True)
+class PendingEntry:
+    signal_idx: int
+    signal_date: str
+    market_state: str
+    position_fraction: float
+    rsi: float
+
+
+def _entry_today(pending: list[PendingEntry], i: int, bar: Candle, previous: Candle,
+                 policy: ReplayPolicy, recovery: RecoveryPolicy | None
+                 ) -> tuple[PendingEntry, float, str] | None:
+    if not pending:
+        return None
+    first = pending[0]
+    if recovery is None:
+        return first, bar.open, "NEXT_OPEN"
+    newest = pending[-1]
+    if (recovery.gap_entry and newest.signal_idx == i - 1
+            and bar.open <= previous.close * (1 - policy.three_day_dip_pct / 100)):
+        return newest, bar.open, "RECOVERY_GAP"
+    if bar.open >= previous.high:
+        return first, bar.open, "RECOVERY_OPEN"
+    if bar.high >= previous.high:
+        return first, previous.high, "RECOVERY_BREAKOUT"
+    return None
+
+
 def replay_ticker(*, item: WatchItem, stock: dict[str, Any], index: dict[str, Any] | None,
                   start: str, end: str, policy: ReplayPolicy,
                   price_only: bool = False, assume_uptrend: bool = False,
-                  market_mode: str = "strict") -> dict[str, Any]:
-    """Replay with T-close signals and strictly T+1-open entry.
+                  market_mode: str = "strict",
+                  recovery: RecoveryPolicy | None = None) -> dict[str, Any]:
+    """Replay T-close signals with next-open or optional recovery entry.
 
     One position at a time per ticker. Results are per-trade observations, not
     a combined portfolio curve. A dated evidence source gates all earlier bars.
@@ -136,21 +210,70 @@ def replay_ticker(*, item: WatchItem, stock: dict[str, Any], index: dict[str, An
     trades = []
     open_position = None
     blocked_signals = []
-    skip_until = -1
-    for i in range(30, len(stock_bars) - 1):
+    pending: list[PendingEntry] = []
+    position = None
+    entry_idx = -1
+    buy = stop = realized = 0.0
+    remaining = 0.0
+    exits: list[dict[str, Any]] = []
+    closes = [bar.close for bar in stock_bars[:30]]
+    sell_slippage = 1 - policy.slippage_bps / 10000
+    sell_cost = 1 - (policy.fee_bps + policy.sell_tax_bps) / 10000
+    buy_fee = 1 + policy.fee_bps / 10000
+    wait = recovery.wait_sessions if recovery else 1
+    for i in range(30, len(stock_bars)):
         signal_bar = stock_bars[i]
         signal_day = date.fromisoformat(signal_bar.date)
-        if i <= skip_until or signal_day < eligible_from or signal_day >= finish:
+        previous = stock_bars[i - 1]
+        closes.append(signal_bar.close)
+        pending = [signal for signal in pending if i - signal.signal_idx <= wait]
+        if position is None and (assume_uptrend or signal_bar.date in index_by_date):
+            entry = _entry_today(pending, i, signal_bar, previous, policy, recovery)
+            if entry is not None:
+                signal, reference, basis = entry
+                buy = reference * (1 + policy.slippage_bps / 10000)
+                stop = buy * (1 - policy.stop_loss_pct / 100)
+                entry_idx = i
+                remaining = 1.0
+                realized = 0.0
+                exits = []
+                position = {"signal_date": signal.signal_date, "entry_date": signal_bar.date,
+                            "market_state": signal.market_state,
+                            "position_fraction_of_sleeve": signal.position_fraction,
+                            "rsi14_signal": round(signal.rsi, 2), "entry_price": round(buy, 3)}
+                if recovery:
+                    position["entry_basis"] = basis
+                pending.clear()
+        if position is not None:
+            hold = i - entry_idx
+            if recovery:
+                sales, stop = _recovery_sales_today(
+                    signal_bar, hold, buy, position["entry_basis"] != "RECOVERY_BREAKOUT",
+                    stop, remaining, policy, recovery)
+            else:
+                outcome = _exit_fill(signal_bar, buy, policy, hold)
+                sales = [(*outcome, 1.0)] if outcome else []
+            for reference, reason, fraction in sales:
+                sell = reference * sell_slippage
+                net = (sell * sell_cost / (buy * buy_fee) - 1) * 100
+                realized += fraction * net
+                remaining -= fraction
+                exits.append({"exit_date": signal_bar.date, "exit_price": round(sell, 3),
+                              "exit_reason": reason, "fraction": fraction, "net_return_pct": round(net, 4)})
+            if remaining <= 0:
+                final = {key: exits[-1][key] for key in ("exit_date", "exit_price", "exit_reason")}
+                trade = {**position, **final, "hold_days": hold, "net_return_pct": round(realized, 4)}
+                if recovery:
+                    trade["exit_legs"] = exits
+                trades.append(trade)
+                position = None
             continue
-        entry = stock_bars[i + 1]
-        if date.fromisoformat(entry.date) > finish or (
-            not assume_uptrend and entry.date not in index_by_date
-        ):
+        if signal_day < eligible_from:
             continue
-        closes = [b.close for b in stock_bars[:i + 1]]
         rsi = _rsi(closes)
+        change = signal_bar.close - stock_bars[i - 1].close
         if (rsi is None or rsi > policy.rsi_ceiling
-                or signal_bar.close <= stock_bars[i - 1].close
+                or (change >= 0 if recovery else change <= 0)
                 or signal_bar.close / stock_bars[i - 3].close - 1 > -policy.three_day_dip_pct / 100):
             continue
         # Index must be a confirmed same-session bar; never use future prices.
@@ -197,34 +320,14 @@ def replay_ticker(*, item: WatchItem, stock: dict[str, Any], index: dict[str, An
                     blocked_signals.append({"date": signal_bar.date,
                                             "reason": "UNKNOWN_PRISM_MARKET_STATE"})
                     continue
-        buy = entry.open * (1 + policy.slippage_bps / 10000)
-        entry_cash = buy * (1 + policy.fee_bps / 10000)
-        sell_slippage = 1 - policy.slippage_bps / 10000
-        sell_cost = 1 - (policy.fee_bps + policy.sell_tax_bps) / 10000
-        position = {"signal_date": signal_bar.date, "entry_date": entry.date,
-                    "market_state": market_state, "position_fraction_of_sleeve": position_fraction,
-                    "rsi14_signal": round(rsi, 2), "entry_price": round(buy, 3)}
-        last_exit_idx = min(i + 1 + policy.max_hold_days, len(stock_bars) - 1)
-        for exit_idx in range(i + 1, last_exit_idx + 1):
-            exit_bar = stock_bars[exit_idx]
-            hold = exit_idx - i - 1
-            outcome = _exit_fill(exit_bar, buy, policy, hold)
-            if outcome is None:
-                continue
-            exit_reference, reason = outcome
-            sell = exit_reference * sell_slippage
-            trades.append({**position, "exit_date": exit_bar.date, "hold_days": hold,
-                           "exit_price": round(sell, 3), "exit_reason": reason,
-                           "net_return_pct": round((sell * sell_cost / entry_cash - 1) * 100, 4)})
-            skip_until = exit_idx
-            break
-        else:
-            # The entry happened, but the position has no exit in the observed window.
-            mark = stock_bars[-1]
-            open_position = {**position, "mark_date": mark.date, "mark_close": mark.close,
-                             "marked_net_return_pct": round(
-                                 (mark.close * sell_slippage * sell_cost / entry_cash - 1) * 100, 4)}
-            break
+        pending.append(PendingEntry(i, signal_bar.date, market_state, position_fraction, rsi))
+    if position is not None:
+        mark = stock_bars[-1]
+        mark_net = (mark.close * sell_slippage * sell_cost / (buy * buy_fee) - 1) * 100
+        open_position = {**position, "mark_date": mark.date, "mark_close": mark.close,
+                         "marked_net_return_pct": round(realized + remaining * mark_net, 4)}
+        if recovery:
+            open_position.update(exit_legs=exits, remaining_fraction=remaining)
     returns = [t["net_return_pct"] for t in trades]
     # Idle sleeve capital remains cash; tactical sizing must affect the
     # *portfolio* return, not just annotate a hypothetical full-size fill.
@@ -247,7 +350,9 @@ def replay_ticker(*, item: WatchItem, stock: dict[str, Any], index: dict[str, An
             "tactical_risk_rule": ("SLEEVE_UPTREND_100_UNDER_PRESSURE_50_CORRECTION_25;"
                                    "KOSPI_PANIC_1DAY_MINUS4_3DAY_MINUS8"
                                    if market_mode == "tactical" else None),
-            "signal": "RSI14_DIP_REVERSAL", "model": asdict(policy),
+            "signal": "RSI14_DIP_RECOVERY" if recovery else "RSI14_DIP_REVERSAL",
+            "execution": "BLIND_CHRONOLOGICAL_DAILY_REPLAY",
+            "model": asdict(policy), "recovery": asdict(recovery) if recovery else None,
             "trades": trades, "count": len(trades), "open_position": open_position,
             "market_guard_rejections": blocked_signals,
             "win_rate_pct": round(100 * sum(r > 0 for r in returns) / len(returns), 2)

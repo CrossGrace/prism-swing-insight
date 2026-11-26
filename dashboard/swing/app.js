@@ -6,6 +6,12 @@ const currency = new Intl.NumberFormat("ko-KR", {
 });
 const percent = (value) => value == null ? "—" : `${value > 0 ? "+" : ""}${value.toFixed(2)}%`;
 const exits = {
+  STOP: "손절",
+  STOP_COLLISION: "손절·익절 동시 도달 · 손절 우선",
+  ENTRY_BAR_STOP_ASSUMED: "돌파일 저가가 손절선 하회 · 순서 미확인으로 손절 가정",
+  TRAIL_GAP: "갭 하락 · 추적손절",
+  TRAIL_STOP: "추적손절",
+  PARTIAL_TAKE: "목표가 도달 · 분할 익절",
   STOP_GAP: "갭 하락 손절",
   STOP_FIRST_OR_COLLISION: "손절 · 동시 도달 시 손절 우선",
   TAKE: "목표가 도달",
@@ -126,12 +132,17 @@ function draw() {
   layer.replaceChildren();
   const fillCounts = new Map();
   for (const {date} of fills) fillCounts.set(date, (fillCounts.get(date) ?? 0) + 1);
+  const sellOffsets = new Map();
   for (const fill of fills) {
     const i = positions.get(fill.date);
     if (i === undefined) continue;
     const stem = y(fill.price);
     const top = stem + (fill.side === "buy" ? 18 : -18);
-    const offset = fillCounts.get(fill.date) > 1 ? (fill.side === "buy" ? -14 : 14) : 0;
+    const sellOffset = sellOffsets.get(fill.date) ?? 0;
+    if (fill.side === "sell") sellOffsets.set(fill.date, sellOffset + 1);
+    const offset = fillCounts.get(fill.date) > 1
+      ? (fill.side === "buy" ? -14 : 14 + sellOffset * 24)
+      : 0;
     const markerX = x(i) + offset;
     ctx.lineWidth = 1;
     ctx.strokeStyle = color(fill.side === "buy" ? "--buy" : "--sell");
@@ -180,17 +191,24 @@ function renderTable() {
 
 function renderRules(scenario) {
   const model = scenario.model;
-  el("policy-mode").textContent = el("mode").selectedOptions[0].textContent;
+  const recovery = scenario.recovery;
+  el("policy-mode").textContent = [el("strategy"), el("mode")]
+    .map((select) => select.selectedOptions[0].textContent).join(" · ");
   const rows = [
-    ["판단 시점", "확정 일봉의 종가까지 확인하고, 다음 거래일 시가에 가상 진입"],
-    ["진입", `Wilder RSI(14) ≤ ${model.rsi_ceiling} · 3거래일 등락률 ≤ −${model.three_day_dip_pct}% · 당일 종가 반등`],
+    ["판단 시점", recovery
+      ? `하락일 종가에 감시 시작 · 이후 ${recovery.wait_sessions}거래일 안에 직전 거래일 고가 도달 시 진입. 시가가 고가 이상이면 시가 적용.`
+      : "확정 일봉의 종가까지 확인하고, 다음 거래일 시가에 가상 진입"],
+    ["진입", `Wilder RSI(14) ≤ ${model.rsi_ceiling} · 3거래일 등락률 ≤ −${model.three_day_dip_pct}% · ${recovery ? "당일 종가 하락" : "당일 종가 반등"}`],
+    ...(recovery?.gap_entry ? [["갭 진입", `감시 시작 다음 거래일 시가가 신호일 종가보다 ${model.three_day_dip_pct}% 이상 낮으면 시가 진입.`]] : []),
     ["시장 조건", el("mode").value === "strict" ? "실제 코스피 일봉으로 프리즘 시장 상태 계산 · 상승장에서만 신규 진입" : "비교용 시나리오 · 코스피를 상승장으로 가정"],
-    ["청산", `손절 −${model.stop_loss_pct}% · 익절 +${model.take_profit_pct}% · 최대 보유 ${model.max_hold_days}거래일`],
-    ["일봉 체결", "시가 진입 후 당일 청산 가능. 손절·익절이 모두 닿으면 손절 우선. 갭 하락은 시가, 익절 갭 상승은 목표가 기준."],
+    ["청산", `손절 −${model.stop_loss_pct}% · 익절 +${model.take_profit_pct}% · ${recovery ? `목표가에서 ${recovery.first_sale_fraction * 100}% 청산 · 잔량은 이후 종가 기준 ${recovery.trail_pct}% 추적손절 · ` : ""}최대 보유 ${model.max_hold_days}거래일`],
+    ["일봉 체결", recovery
+      ? "돌파일 저가가 손절선 아래면 장중 순서를 알 수 없어 손절로 처리합니다. 추적손절은 종가 확정 후 다음 거래일부터 적용합니다."
+      : "시가 진입 후 당일 청산 가능. 손절·익절이 모두 닿으면 손절 우선. 갭 하락은 시가, 익절 갭 상승은 목표가 기준."],
     ["종료일 보유", "미청산 매수는 종료일 종가로 평가하고 가정한 매도 비용을 차감합니다. 완료 거래와 승률에는 포함하지 않습니다."],
     ["비용 가정", `수수료 편도 ${model.fee_bps}bp · 매도세 ${model.sell_tax_bps}bp · 슬리피지 편도 ${model.slippage_bps}bp`],
     ["투입·수량", "종목별 한 포지션을 가정. 가상 체결은 주당 가격으로 기록하며 주문 수량·총 금액은 기록하지 않음."],
-    ["재생 범위", "가격과 거래량 기반의 과거 연구 재생. LLM 판단, 분할 주문, 증권사 체결은 포함하지 않음."],
+    ["재생 범위", "모든 정책은 같은 블라인드 일봉 엔진을 사용합니다. 확정된 봉을 날짜순으로 공개합니다. 과거 재생이며 신규 정책의 표본 외 성과는 미검증입니다."],
   ];
   el("rules").replaceChildren(...rows.flatMap(([label, value]) => [node("dt", label), node("dd", value)]));
   const rejected = scenario.market_guard_rejections;
@@ -201,25 +219,37 @@ function renderRules(scenario) {
 
 function render() {
   const instrument = dataset.instruments.find((item) => item.ticker === el("ticker").value);
-  const scenario = instrument.variants[el("mode").value];
+  const variants = {
+    baseline: instrument.variants,
+    recovery: instrument.recovery_variants,
+    gap: instrument.gap_variants,
+  }[el("strategy").value];
+  const scenario = variants[el("mode").value];
   prices = instrument.prices;
   el("chart-title").textContent = `${instrument.name} 일봉 가격 흐름`;
   const entryFill = (trade, id, status) => ({
     id, date: trade.entry_date, side: "buy", label: "매수",
     price: trade.entry_price,
-    reason: `${trade.signal_date} 종가 신호 · 다음 거래일 시가 진입${status}`,
+    reason: `${trade.signal_date} 종가 신호 · ${{
+      RECOVERY_GAP: "하락 갭 시가 진입",
+      RECOVERY_OPEN: "시가 돌파 진입",
+      RECOVERY_BREAKOUT: "직전 고가 돌파 진입",
+    }[trade.entry_basis] ?? "다음 거래일 시가 진입"}${status}`,
   });
+  const sellFills = (trade, id, legs) => legs.map((leg, i) => ({
+    id: `${id}-sell-${i}`, date: leg.exit_date, side: "sell",
+    label: leg.fraction < 1 ? `매도 ${leg.fraction * 100}%` : "매도",
+    price: leg.exit_price, net: leg.net_return_pct,
+    reason: `${trade.entry_date === leg.exit_date ? "당일 청산 · " : ""}${exits[leg.exit_reason] ?? leg.exit_reason}`,
+  }));
   fills = scenario.trades.flatMap((trade, i) => [
     entryFill(trade, `${i}-buy`, ""),
-    {
-      id: `${i}-sell`, date: trade.exit_date, side: "sell", label: "매도",
-      price: trade.exit_price, net: trade.net_return_pct,
-      reason: `${trade.entry_date === trade.exit_date ? "당일 청산 · " : ""}${exits[trade.exit_reason] ?? trade.exit_reason}`,
-    },
+    ...sellFills(trade, i, trade.exit_legs ?? [trade]),
   ]);
   if (scenario.open_position) {
     const position = scenario.open_position;
-    fills.push(entryFill(position, "open-buy", ` · 종료일 미청산 · 평가 ${percent(position.marked_net_return_pct)}`));
+    fills.push(entryFill(position, "open-buy", ` · 종료일 미청산 · 평가 ${percent(position.marked_net_return_pct)}`),
+      ...sellFills(position, "open", position.exit_legs ?? []));
   }
   fills.sort((a, b) => a.date.localeCompare(b.date));
   metric("result", scenario.marked_net_sleeve_pct ?? scenario.compounded_net_sleeve_pct);
@@ -243,6 +273,7 @@ for (const tab of tabs) {
 }
 el("ticker").addEventListener("change", render);
 el("mode").addEventListener("change", render);
+el("strategy").addEventListener("change", render);
 new ResizeObserver(draw).observe(el("plot"));
 
 async function init() {

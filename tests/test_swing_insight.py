@@ -12,7 +12,7 @@ import pytest
 from swing_insight.analyst import ThesisOpinion, analyze_thesis, validate_opinion
 from swing_insight.journal import PaperPolicy, SwingJournal
 from swing_insight.market import MarketDataUnavailable, evaluate_market, normalized_bars
-from swing_insight.simulator import ReplayPolicy, _rsi, replay_ticker
+from swing_insight.simulator import RecoveryPolicy, ReplayPolicy, _rsi, replay_ticker
 from swing_insight.sources import (get_market_snapshots, get_public_research_ohlcv,
                                    get_public_research_kospi)
 from swing_insight.watchlist import Evidence, WatchItem, load_watchlist
@@ -388,3 +388,80 @@ def test_replay_requires_explicit_valid_costs_and_intraday_limit():
         ReplayPolicy(90, 2, 3, 5, 4, 10, 20, 5)
     with pytest.raises(ValueError, match="Invalid replay policy"):
         ReplayPolicy(90, 2, 3, 5, 1, -10, 20, 5)
+
+
+def test_recovery_waits_two_sessions_and_trails_remaining_half_after_close():
+    stock, _, days = replay_fixture()
+    stock[days[74]].update(Open=91, High=94, Low=88, Close=89)
+    stock[days[75]].update(Open=90, High=93, Low=89, Close=92)
+    stock[days[76]].update(Open=94, High=103, Low=93, Close=101)
+    stock[days[77]].update(Open=100, High=106, Low=98, Close=104)
+    stock[days[78]].update(Open=101, High=103, Low=98, Close=99)
+    item = WatchItem("010060", "OCI홀딩스", "LTA", ("계약 악화",), ())
+    policy = ReplayPolicy(90, 2, 3, 5, 3, 0, 0, 0)
+    args = dict(item=item, stock=stock, index=None, start=days[74], policy=policy,
+                price_only=True, assume_uptrend=True, recovery=RecoveryPolicy())
+
+    result = replay_ticker(**args, end=days[-1])
+    trade, = result["trades"]
+    assert trade["signal_date"] == days[74]
+    assert trade["entry_date"] == days[76]
+    assert trade["entry_price"] == 94
+    first, last = trade["exit_legs"]
+    assert (first["exit_date"], first["exit_reason"], first["fraction"]) == (days[76], "PARTIAL_TAKE", 0.5)
+    assert (last["exit_date"], last["exit_reason"], last["fraction"]) == (days[78], "TRAIL_STOP", 0.5)
+    assert last["exit_price"] == pytest.approx(104 * 0.95)
+    expected = 100 * ((94 * 1.05 + 104 * 0.95) / (2 * 94) - 1)
+    assert trade["net_return_pct"] == round(expected, 4)
+
+    prefix = replay_ticker(**args, end=days[76])
+    assert prefix["count"] == 0
+    assert prefix["open_position"]["exit_legs"] == [first]
+    assert prefix["open_position"]["remaining_fraction"] == 0.5
+
+
+def test_recovery_does_not_assume_intraday_low_preceded_breakout():
+    stock, _, days = replay_fixture()
+    stock[days[74]].update(Open=91, High=94, Low=88, Close=89)
+    stock[days[75]].update(Open=89, High=110, Low=86, Close=105)
+    item = WatchItem("010060", "OCI홀딩스", "LTA", ("계약 악화",), ())
+    policy = ReplayPolicy(90, 2, 3, 5, 3, 0, 0, 0)
+    result = replay_ticker(item=item, stock=stock, index=None, start=days[74],
+                           end=days[75], policy=policy, price_only=True,
+                           assume_uptrend=True, recovery=RecoveryPolicy())
+    trade, = result["trades"]
+    assert trade["entry_price"] == 94
+    assert trade["exit_reason"] == "ENTRY_BAR_STOP_ASSUMED"
+    assert trade["net_return_pct"] == -3
+
+    # A gap-entry variant uses the observed open and never reads the day's low
+    # to decide whether to enter. Its stop and target apply after the opening fill.
+    stock[days[75]].update(Open=87, Low=86.5)
+    gap = replay_ticker(item=item, stock=stock, index=None, start=days[74],
+                        end=days[75], policy=policy, price_only=True,
+                        assume_uptrend=True, recovery=RecoveryPolicy(gap_entry=True))
+    position = gap["open_position"]
+    assert position["entry_basis"] == "RECOVERY_GAP"
+    assert position["entry_price"] == 87
+    assert position["exit_legs"][0]["exit_reason"] == "PARTIAL_TAKE"
+    assert position["remaining_fraction"] == 0.5
+
+
+@pytest.mark.parametrize("recovery", [None, RecoveryPolicy(), RecoveryPolicy(gap_entry=True)])
+def test_blind_replay_prefix_is_independent_of_future_bars(recovery):
+    stock, _, days = replay_fixture()
+    start = days[74] if recovery else days[40]
+    if recovery:
+        stock[days[74]].update(Open=91, High=94, Low=88, Close=89)
+        stock[days[75]].update(Open=87 if recovery.gap_entry else 95, High=110, Low=86 if recovery.gap_entry else 94, Close=103)
+    item = WatchItem("010060", "OCI홀딩스", "LTA", ("계약 악화",), ())
+    args = dict(item=item, index=None, start=start, end=days[75],
+                policy=ReplayPolicy(90, 2, 3, 5, 3, 0, 0, 0),
+                price_only=True, assume_uptrend=True, recovery=recovery)
+    prefix = {day: row for day, row in stock.items() if day <= days[75]}
+    # This malformed future bar would throw if any strategy tried to read it.
+    future = {**stock, days[76]: {"Open": "FUTURE"}}
+    result = replay_ticker(**args, stock=prefix)
+    assert result == replay_ticker(**args, stock=future)
+    assert result["execution"] == "BLIND_CHRONOLOGICAL_DAILY_REPLAY"
+    assert result["trades"] or result["open_position"]

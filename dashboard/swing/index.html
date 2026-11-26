@@ -22,6 +22,11 @@
   <div id="workspace" hidden>
     <div class="toolbar">
       <label>종목 <select id="ticker"></select></label>
+      <label>정책 <select id="strategy">
+        <option value="baseline">기존 종가 반등</option>
+        <option value="recovery">급락 후 돌파 · 분할 익절</option>
+        <option value="gap">급락 후 갭 진입 또는 돌파 · 분할 익절</option>
+      </select></label>
       <label>시장 조건 <select id="mode">
         <option value="assumed">코스피 상승장 가정</option>
         <option value="strict">실제 코스피 필터</option>
@@ -49,7 +54,7 @@
         <div class="panel-title"><h2>모의 거래 내역</h2><span id="row-count"></span></div>
         <div class="table-scroll">
           <table>
-            <thead><tr><th scope="col">거래일</th><th scope="col">구분</th><th scope="col">주당 가격</th><th scope="col">체결 사유</th><th scope="col">거래 순수익률</th></tr></thead>
+            <thead><tr><th scope="col">거래일</th><th scope="col">구분</th><th scope="col">주당 모의 가격</th><th scope="col">체결 사유</th><th scope="col">청산분 순수익률</th></tr></thead>
             <tbody id="trades"></tbody>
           </table>
         </div>
