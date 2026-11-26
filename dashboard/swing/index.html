@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <title>PRISM Swing · 일봉 모니터</title>
+  <link rel="stylesheet" href="./style.css">
+  <script src="./app.js" defer></script>
+</head>
+<body>
+<main>
+  <header class="mast">
+    <div><div class="brand">PRISM <span>SWING</span></div><h1>일봉 모니터</h1></div>
+    <span class="status">과거 일봉 재생</span>
+  </header>
+  <nav class="tabs" aria-label="화면">
+    <button type="button" data-tab="overview" aria-current="page">거래 타임라인</button>
+    <button type="button" data-tab="policy">적용 정책</button>
+  </nav>
+  <p id="error" role="alert" hidden></p>
+  <div id="workspace" hidden>
+    <div class="toolbar">
+      <label>종목 <select id="ticker"></select></label>
+      <label>정책 <select id="strategy">
+        <option value="baseline">기존 종가 반등</option>
+        <option value="recovery">급락 후 돌파 · 분할 익절</option>
+        <option value="gap">급락 후 갭 진입 또는 돌파 · 분할 익절</option>
+      </select></label>
+      <label>시장 조건 <select id="mode">
+        <option value="assumed">코스피 상승장 가정</option>
+        <option value="strict">실제 코스피 필터</option>
+      </select></label>
+      <span id="period"></span>
+    </div>
+    <section id="overview">
+      <div class="metrics" aria-label="거래 요약">
+        <div><span>모의 수익률 · 종료일 평가 포함</span><strong id="result"></strong></div>
+        <div><span>완료 거래</span><strong id="count"></strong></div>
+        <div><span>승률</span><strong id="win"></strong></div>
+        <div><span>동기간 단순 보유</span><strong id="benchmark"></strong></div>
+      </div>
+      <section class="panel">
+        <div class="panel-title">
+          <div><h2 id="chart-title">일봉 가격 흐름</h2><p>일봉 종가와 모의 체결가 · 원</p></div>
+          <div class="legend"><span class="buy">↑ 매수</span><span class="sell">↓ 매도</span></div>
+        </div>
+        <div class="chart-scroll" tabindex="0" aria-label="시간순 가격 차트. 작은 화면에서는 가로로 스크롤하세요.">
+          <div id="plot"><canvas id="chart" role="img" aria-label="일봉 종가 추이"></canvas><div id="markers"></div></div>
+        </div>
+        <div id="detail" class="detail" aria-live="polite"></div>
+      </section>
+      <section class="panel">
+        <div class="panel-title"><h2>모의 거래 내역</h2><span id="row-count"></span></div>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th scope="col">거래일</th><th scope="col">구분</th><th scope="col">주당 모의 가격</th><th scope="col">체결 사유</th><th scope="col">청산분 순수익률</th></tr></thead>
+            <tbody id="trades"></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+    <section id="policy" class="panel policy" hidden>
+      <div class="panel-title"><div><h2>적용 정책</h2><p id="policy-mode"></p></div></div>
+      <dl id="rules"></dl>
+      <section id="rejections" hidden>
+        <h3>시장 필터로 차단된 신호</h3>
+        <ul id="rejection-list"></ul>
+      </section>
+    </section>
+    <footer>종목 일봉 <a href="https://aikstockdata.com/downloads/history">한국주식데이터</a> (원천 금융위원회 공공데이터) · 코스피 일봉 네이버 금융 · 11/23~11/26 종목 시세는 장마감 자료 대조 · 연구용</footer>
+  </div>
+</main>
+</body>
+</html>

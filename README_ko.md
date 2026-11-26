@@ -19,6 +19,8 @@
 
 # PRISM-INSIGHT
 
+> **포크 실험 — OCI홀딩스·LS ELECTRIC 0~3거래일 스윙:** 본선 거래와 분리된 MCP 시세·OpenAI 논리검토·보수적 일봉 모의 재생은 [실행 가이드](docs/SWING_INSIGHT_OCI_LS_MVP_ko.md)를 참조하세요. 실주문 기능은 없습니다.
+
 [![GitHub Sponsors](https://img.shields.io/github/sponsors/dragon1086?style=for-the-badge&logo=github-sponsors&color=ff69b4&label=Sponsors)](https://github.com/sponsors/dragon1086)
 [![Stars](https://img.shields.io/github/stars/dragon1086/prism-insight?style=for-the-badge)](https://github.com/dragon1086/prism-insight/stargazers)
 
