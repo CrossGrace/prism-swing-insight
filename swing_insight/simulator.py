@@ -113,10 +113,12 @@ class RecoveryPolicy:
     first_sale_fraction: float = 0.5
     trail_pct: float = 5.0
     gap_entry: bool = False
+    min_daily_drop_pct: float = 0.0
 
     def __post_init__(self) -> None:
         if (type(self.wait_sessions) is not int or not 1 <= self.wait_sessions <= 2
-                or not 0 < self.first_sale_fraction < 1 or not 0 < self.trail_pct < 100):
+                or not 0 < self.first_sale_fraction < 1 or not 0 < self.trail_pct < 100
+                or not 0 <= self.min_daily_drop_pct < 100):
             raise ValueError("Invalid recovery research policy")
 
 
@@ -271,9 +273,10 @@ def replay_ticker(*, item: WatchItem, stock: dict[str, Any], index: dict[str, An
         if signal_day < eligible_from:
             continue
         rsi = _rsi(closes)
-        change = signal_bar.close - stock_bars[i - 1].close
+        change = signal_bar.close / previous.close - 1
         if (rsi is None or rsi > policy.rsi_ceiling
                 or (change >= 0 if recovery else change <= 0)
+                or (recovery and change > -recovery.min_daily_drop_pct / 100)
                 or signal_bar.close / stock_bars[i - 3].close - 1 > -policy.three_day_dip_pct / 100):
             continue
         # Index must be a confirmed same-session bar; never use future prices.

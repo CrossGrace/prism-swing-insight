@@ -26,10 +26,12 @@
         <option value="baseline">기존 종가 반등</option>
         <option value="recovery">급락 후 돌파 · 분할 익절</option>
         <option value="gap">급락 후 갭 진입 또는 돌파 · 분할 익절</option>
+        <option value="sharp">당일 6% 급락 후 반등 · 분할 익절 (연구)</option>
       </select></label>
       <label>시장 조건 <select id="mode">
         <option value="assumed">코스피 상승장 가정</option>
-        <option value="strict">실제 코스피 필터</option>
+        <option value="strict">실제 코스피 · 상승장만</option>
+        <option value="tactical">실제 코스피 · 국면별 비중</option>
       </select></label>
       <span id="period"></span>
     </div>
@@ -39,6 +41,12 @@
         <div><span>완료 거래</span><strong id="count"></strong></div>
         <div><span>승률</span><strong id="win"></strong></div>
         <div><span>동기간 단순 보유</span><strong id="benchmark"></strong></div>
+      </div>
+      <div class="metrics" aria-label="종료일 모의 계좌">
+        <div><span>시작 현금</span><strong>₩10,000,000</strong></div>
+        <div><span>종료일 현금</span><strong id="cash"></strong></div>
+        <div><span>종료일 보유</span><strong id="holding"></strong></div>
+        <div><span>보유 주식 평가액</span><strong id="holding-value"></strong></div>
       </div>
       <section class="panel">
         <div class="panel-title">
@@ -51,10 +59,13 @@
         <div id="detail" class="detail" aria-live="polite"></div>
       </section>
       <section class="panel">
-        <div class="panel-title"><h2>모의 거래 내역</h2><span id="row-count"></span></div>
+        <div class="panel-title">
+          <div><h2>모의 거래 내역</h2><p>매수 비중은 직전 현금 대비 지출, 매도 비중은 직전 보유 주수 대비 매도 수량입니다.</p></div>
+          <span id="row-count"></span>
+        </div>
         <div class="table-scroll">
           <table>
-            <thead><tr><th scope="col">거래일</th><th scope="col">구분</th><th scope="col">주당 모의 가격</th><th scope="col">체결 사유</th><th scope="col">청산분 순수익률</th></tr></thead>
+            <thead><tr><th scope="col">거래일</th><th scope="col">구분</th><th scope="col">주당 모의 가격</th><th scope="col">수량 (비중)</th><th scope="col">체결 후 보유</th><th scope="col">체결 후 현금</th><th scope="col">체결 사유</th><th scope="col">청산분 순수익률</th></tr></thead>
             <tbody id="trades"></tbody>
           </table>
         </div>
