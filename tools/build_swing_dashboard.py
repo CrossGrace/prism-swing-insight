@@ -1,15 +1,11 @@
 """Build the read-only daily swing research dashboard."""
 
 import asyncio
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time
 import json
 from pathlib import Path
-import re
 import shutil
 import sys
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
-from xml.etree import ElementTree
 from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,31 +21,25 @@ LAST_VERIFIED_STOCK_DAY = "2026-11-20"
 POLICY = ReplayPolicy(45, 2, 3, 5, 3, 10, 20, 10)
 
 
-def get_naver_stock_tail(ticker: str, start: str, end: str) -> dict:
-    queries = urlencode({
-        "symbol": ticker, "timeframe": "day", "requestType": 0, "count": 60,
-    })
-    url = f"https://fchart.stock.naver.com/sise.nhn?{queries}"
-    with urlopen(Request(url, headers={"User-Agent": "PRISM-swing-insight-research/0.1"}),
-                 timeout=15) as response:
-        payload = response.read()
-    declaration = re.match(rb"""<\?xml[^>]*encoding=["']([a-zA-Z0-9_-]+)["']""", payload, re.IGNORECASE)
-    encoding = declaration[1].decode("ascii") if declaration else "utf-8-sig"
-    root = ElementTree.fromstring(payload.decode(encoding))
-    chart = root if root.tag == "chartdata" else root.find(".//chartdata")
-    if chart is None or chart.get("symbol", ticker) != ticker:
-        raise ValueError(f"Naver returned no matching stock chart: {ticker}")
-    rows = {}
-    for item in chart.findall(".//item"):
-        stamp, *values = item.attrib["data"].split("|")
-        day = date.fromisoformat(stamp).isoformat()
-        if not start <= day <= end:
-            continue
-        if day in rows:
-            raise ValueError(f"Unexpected Naver trading date: {ticker} {day}")
-        o, h, l, c, v = map(float, values)
-        rows[day] = {"Open": o, "High": h, "Low": l, "Close": c, "Volume": v}
-    return rows
+# KRX regular-session OHLCV for the four sessions after the verified snapshot.
+# OCI: https://kr.investing.com/equities/oci-co-ltd-historical-data
+# Volume: https://stock.mk.co.kr/price/foreigner/KR7010060002
+# LS: https://aikstockdata.com/s/010120 and https://markets.hankyung.com/stock/010120
+# LS 11/26 open: https://kr.investing.com/equities/ls-industrial-systems-historical-data
+VERIFIED_TAIL = {
+    "010060": (
+        ("2026-11-23", 152800, 155300, 143300, 149500, 261590),
+        ("2026-11-24", 155400, 167300, 154900, 163800, 238592),
+        ("2026-11-25", 157200, 161500, 153400, 156700, 116202),
+        ("2026-11-26", 166800, 179700, 163400, 165400, 257972),
+    ),
+    "010120": (
+        ("2026-11-23", 105000, 112500, 105000, 110200, 600647),
+        ("2026-11-24", 116400, 123600, 116300, 122000, 685897),
+        ("2026-11-25", 115800, 116900, 110800, 114300, 486864),
+        ("2026-11-26", 115100, 117300, 112100, 113400, 366194),
+    ),
+}
 
 
 async def get_stock_for_replay(ticker: str) -> tuple[dict, str]:
@@ -59,18 +49,14 @@ async def get_stock_for_replay(ticker: str) -> tuple[dict, str]:
         if str(exc) != "PUBLIC_DAILY_PRICE_NOT_YET_AVAILABLE_FOR_END_DATE":
             raise
     historical = await get_public_research_ohlcv(ticker, LAST_VERIFIED_STOCK_DAY, start=START)
-    anchor = date.fromisoformat(LAST_VERIFIED_STOCK_DAY)
-    overlap_start = (anchor - timedelta(days=10)).isoformat()
-    tail = await asyncio.to_thread(get_naver_stock_tail, ticker, overlap_start, END)
-    overlap = [day for day in historical if overlap_start <= day <= anchor.isoformat()]
-    if LAST_VERIFIED_STOCK_DAY not in overlap or END not in tail or any(
-        day not in tail or any(float(historical[day][key]) != tail[day][key]
-                               for key in ("Open", "High", "Low", "Close"))
-        for day in overlap
-    ):
-        raise ValueError(f"Naver daily price overlap or end date could not be verified: {ticker}")
-    historical.update({day: row for day, row in tail.items() if day > LAST_VERIFIED_STOCK_DAY})
-    return historical, "한국주식데이터 · 11/23 이후 네이버 금융"
+    tail = {
+        day: {"Open": o, "High": h, "Low": l, "Close": c, "Volume": v}
+        for day, o, h, l, c, v in VERIFIED_TAIL[ticker]
+        if LAST_VERIFIED_STOCK_DAY < day <= END
+    }
+    if LAST_VERIFIED_STOCK_DAY not in historical or END not in tail:
+        raise ValueError(f"Verified KRX snapshot cannot cover the requested end date: {ticker}")
+    return {**historical, **tail}, "한국주식데이터 · 11/23~11/26 장마감 시세 대조"
 
 
 async def build():
