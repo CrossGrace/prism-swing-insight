@@ -465,3 +465,24 @@ def test_blind_replay_prefix_is_independent_of_future_bars(recovery):
     assert result == replay_ticker(**args, stock=future)
     assert result["execution"] == "BLIND_CHRONOLOGICAL_DAILY_REPLAY"
     assert result["trades"] or result["open_position"]
+
+
+def test_sharp_recovery_ignores_mild_drops_and_keeps_severe_drop_signal():
+    stock, _, days = replay_fixture()
+    stock[days[74]].update(Open=91, High=94, Low=88, Close=89)
+    stock[days[75]].update(Open=95, High=104, Low=94, Close=100)
+    args = dict(item=WatchItem("010060", "OCI홀딩스", "LTA", ("계약 악화",), ()),
+                stock=stock, index=None, start=days[74], end=days[75],
+                policy=ReplayPolicy(90, 2, 3, 5, 3, 0, 0, 0),
+                price_only=True, assume_uptrend=True)
+    ordinary = replay_ticker(**args, recovery=RecoveryPolicy(gap_entry=True))
+    sharp = RecoveryPolicy(gap_entry=True, min_daily_drop_pct=6)
+    filtered = replay_ticker(**args, recovery=sharp)
+    assert ordinary["open_position"]["entry_date"] == days[75]
+    assert filtered["open_position"] is None
+    assert filtered["trades"] == []
+
+    stock[days[74]].update(Low=83, Close=84)
+    severe = replay_ticker(**args, recovery=sharp)
+    assert severe["open_position"]["signal_date"] == days[74]
+    assert severe["open_position"]["entry_date"] == days[75]

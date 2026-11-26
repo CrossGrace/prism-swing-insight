@@ -78,11 +78,13 @@ async def build():
                 mode: replay_ticker(
                     item=item, stock=stock, index=index, start=START, end=END, policy=POLICY,
                     price_only=True, assume_uptrend=mode == "assumed", recovery=recovery,
+                    market_mode="tactical" if mode == "tactical" else "strict",
                 )
-                for mode in ("strict", "assumed")
+                for mode in ("strict", "assumed", "tactical")
             }
             for label, recovery in (("baseline", None), ("recovery", RecoveryPolicy()),
-                                    ("gap", RecoveryPolicy(gap_entry=True)))
+                                    ("gap", RecoveryPolicy(gap_entry=True)),
+                                    ("sharp", RecoveryPolicy(gap_entry=True, min_daily_drop_pct=6)))
         }
         instruments.append({
             "ticker": item.ticker,
@@ -95,6 +97,7 @@ async def build():
             "variants": variants["baseline"],
             "recovery_variants": variants["recovery"],
             "gap_variants": variants["gap"],
+            "sharp_variants": variants["sharp"],
         })
 
     output = ROOT / "dist/swing-dashboard"

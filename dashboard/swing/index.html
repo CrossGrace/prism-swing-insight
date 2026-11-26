@@ -26,10 +26,12 @@
         <option value="baseline">기존 종가 반등</option>
         <option value="recovery">급락 후 돌파 · 분할 익절</option>
         <option value="gap">급락 후 갭 진입 또는 돌파 · 분할 익절</option>
+        <option value="sharp">당일 6% 급락 후 반등 · 분할 익절 (연구)</option>
       </select></label>
       <label>시장 조건 <select id="mode">
         <option value="assumed">코스피 상승장 가정</option>
-        <option value="strict">실제 코스피 필터</option>
+        <option value="strict">실제 코스피 · 상승장만</option>
+        <option value="tactical">실제 코스피 · 국면별 비중</option>
       </select></label>
       <span id="period"></span>
     </div>

@@ -208,7 +208,12 @@ function renderRules(scenario) {
       : "확정 일봉의 종가까지 확인하고, 다음 거래일 시가에 가상 진입"],
     ["진입", `Wilder RSI(14) ≤ ${model.rsi_ceiling} · 3거래일 등락률 ≤ −${model.three_day_dip_pct}% · ${recovery ? "당일 종가 하락" : "당일 종가 반등"}`],
     ...(recovery?.gap_entry ? [["갭 진입", `감시 시작 다음 거래일 시가가 신호일 종가보다 ${model.three_day_dip_pct}% 이상 낮으면 시가 진입.`]] : []),
-    ["시장 조건", el("mode").value === "strict" ? "실제 코스피 일봉으로 프리즘 시장 상태 계산 · 상승장에서만 신규 진입" : "비교용 시나리오 · 코스피를 상승장으로 가정"],
+    ...(recovery?.min_daily_drop_pct ? [["급락 필터", `신호일 종가가 전일 종가보다 ${recovery.min_daily_drop_pct}% 이상 하락해야 감시합니다.`]] : []),
+    ["시장 조건", {
+      strict: "실제 코스피 상승장에서만 신규 진입",
+      tactical: "실제 코스피 기준 목표 투입 비중은 상승장 100%, 상승세 약화 50%, 조정장 25%입니다. 지수 1거래일 −4% 또는 3거래일 −8% 이하 급락 시 진입하지 않습니다.",
+      assumed: "비교용 시나리오 · 코스피를 상승장으로 가정",
+    }[el("mode").value]],
     ["청산", `손절 −${model.stop_loss_pct}% · 익절 +${model.take_profit_pct}% · ${recovery ? `목표가에서 ${recovery.first_sale_fraction * 100}% 청산 · 잔량은 이후 종가 기준 ${recovery.trail_pct}% 추적손절 · ` : ""}최대 보유 ${model.max_hold_days}거래일`],
     ["일봉 체결", recovery
       ? "돌파일 저가가 손절선 아래면 장중 순서를 알 수 없어 손절로 처리합니다. 추적손절은 종가 확정 후 다음 거래일부터 적용합니다."
@@ -265,6 +270,7 @@ function render() {
     baseline: instrument.variants,
     recovery: instrument.recovery_variants,
     gap: instrument.gap_variants,
+    sharp: instrument.sharp_variants,
   }[el("strategy").value];
   const scenario = variants[el("mode").value];
   prices = instrument.prices;
@@ -318,7 +324,14 @@ for (const tab of tabs) {
     draw();
   });
 }
-el("ticker").addEventListener("change", render);
+function selectTickerDefaults() {
+  const isOCI = el("ticker").value === "010060";
+  el("strategy").value = isOCI ? "sharp" : "baseline";
+  el("mode").value = isOCI ? "tactical" : "strict";
+  render();
+}
+
+el("ticker").addEventListener("change", selectTickerDefaults);
 el("mode").addEventListener("change", render);
 el("strategy").addEventListener("change", render);
 new ResizeObserver(draw).observe(el("plot"));
@@ -333,7 +346,7 @@ async function init() {
     }
     el("period").textContent = `${dataset.start} – ${dataset.end}`;
     el("workspace").hidden = false;
-    render();
+    selectTickerDefaults();
   } catch {
     el("error").textContent = "일봉 재생 데이터를 불러오지 못했습니다.";
     el("error").hidden = false;
