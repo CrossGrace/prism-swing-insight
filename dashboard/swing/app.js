@@ -4,6 +4,12 @@ const el = (id) => document.getElementById(id);
 const currency = new Intl.NumberFormat("ko-KR", {
   style: "currency", currency: "KRW", maximumFractionDigits: 3,
 });
+const initialCash = 10_000_000;
+const cashFormat = new Intl.NumberFormat("ko-KR", {
+  style: "currency", currency: "KRW", maximumFractionDigits: 0,
+});
+const sharesText = (quantity) => `${quantity.toLocaleString("ko-KR")}주`;
+const sharePct = (pct) => `${pct.toFixed(1)}%`;
 const percent = (value) => value == null ? "—" : `${value > 0 ? "+" : ""}${value.toFixed(2)}%`;
 const exits = {
   STOP: "손절",
@@ -57,7 +63,7 @@ function selectFill(fill, reveal = false) {
   }
   detail.replaceChildren(
     node("strong", `${fill.date} · ${fill.label} · ${currency.format(fill.price)} / 주`),
-    node("span", `${fill.reason}${fill.net == null ? "" : ` · 거래 순수익률 ${percent(fill.net)}`}`),
+    node("span", `${sharesText(fill.quantity)} (${sharePct(fill.quantityPct)}) · 체결 후 ${sharesText(fill.holding)} · 현금 ${cashFormat.format(fill.cash)} · ${fill.reason}${fill.net == null ? "" : ` · 거래 순수익률 ${percent(fill.net)}`}`),
   );
   if (reveal) {
     const marker = el("markers").querySelector(`[data-marker="${selected}"]`);
@@ -169,7 +175,7 @@ function renderTable() {
   body.replaceChildren();
   if (!fills.length) {
     const cell = node("td", "이 기간에 표시할 모의 체결이 없습니다. 차단된 신호는 적용 정책 탭에서 확인할 수 있습니다.", "empty");
-    cell.colSpan = 5;
+    cell.colSpan = 8;
     const row = node("tr");
     row.append(cell);
     body.append(row);
@@ -184,6 +190,8 @@ function renderTable() {
     button.addEventListener("click", () => selectFill(fill, true));
     date.append(button);
     row.append(date, node("td", fill.label, fill.side), node("td", currency.format(fill.price)),
+      node("td", `${sharesText(fill.quantity)} (${sharePct(fill.quantityPct)})`),
+      node("td", sharesText(fill.holding)), node("td", cashFormat.format(fill.cash)),
       node("td", fill.reason), node("td", percent(fill.net), fill.net > 0 ? "positive" : fill.net < 0 ? "negative" : ""));
     body.append(row);
   }
@@ -207,7 +215,7 @@ function renderRules(scenario) {
       : "시가 진입 후 당일 청산 가능. 손절·익절이 모두 닿으면 손절 우선. 갭 하락은 시가, 익절 갭 상승은 목표가 기준."],
     ["종료일 보유", "미청산 매수는 종료일 종가로 평가하고 가정한 매도 비용을 차감합니다. 완료 거래와 승률에는 포함하지 않습니다."],
     ["비용 가정", `수수료 편도 ${model.fee_bps}bp · 매도세 ${model.sell_tax_bps}bp · 슬리피지 편도 ${model.slippage_bps}bp`],
-    ["투입·수량", "종목별 한 포지션을 가정. 가상 체결은 주당 가격으로 기록하며 주문 수량·총 금액은 기록하지 않음."],
+    ["투입·수량", "종목별 모의 계좌에 1,000만원을 배정합니다. 수수료와 세금을 반영하며 거래 수량은 정수 주로 계산합니다."],
     ["재생 범위", "모든 정책은 같은 블라인드 일봉 엔진을 사용합니다. 확정된 봉을 날짜순으로 공개합니다. 과거 재생이며 신규 정책의 표본 외 성과는 미검증입니다."],
   ];
   el("rules").replaceChildren(...rows.flatMap(([label, value]) => [node("dt", label), node("dd", value)]));
@@ -215,6 +223,40 @@ function renderRules(scenario) {
   el("rejections").hidden = !rejected.length;
   el("rejection-list").replaceChildren(...rejected.map((row) =>
     node("li", `${row.date} · ${marketReasons[row.reason] ?? row.reason}`)));
+}
+
+function applyAccount(fills, model, lastClose) {
+  const buyFee = 1 + model.fee_bps / 10000;
+  const sellFactor = 1 - (model.fee_bps + model.sell_tax_bps) / 10000;
+  const closingProceeds = lastClose * sellFactor * (1 - model.slippage_bps / 10000);
+  let cash = initialCash;
+  let holding = 0;
+  let originalQuantity = 0;
+  const executed = [];
+  for (const fill of fills) {
+    let quantity;
+    let quantityPct;
+    if (fill.side === "buy") {
+      const perShare = fill.price * buyFee;
+      quantity = Math.floor(cash * fill.fraction / perShare);
+      if (!quantity) continue;
+      const cost = quantity * perShare;
+      quantityPct = 100 * cost / cash;
+      cash -= cost;
+      holding = quantity;
+      originalQuantity = quantity;
+    } else {
+      quantity = fill.final ? holding : Math.min(holding, Math.floor(originalQuantity * fill.fraction));
+      if (!quantity) continue;
+      quantityPct = 100 * quantity / holding;
+      cash += quantity * fill.price * sellFactor;
+      holding -= quantity;
+    }
+    executed.push({...fill, quantity, quantityPct, cash, holding});
+  }
+  const marketValue = holding * lastClose;
+  const returnPct = (100 * (cash + holding * closingProceeds - initialCash)) / initialCash;
+  return {fills: executed, cash, holding, marketValue, returnPct};
 }
 
 function render() {
@@ -229,16 +271,16 @@ function render() {
   el("chart-title").textContent = `${instrument.name} 일봉 가격 흐름`;
   const entryFill = (trade, id, status) => ({
     id, date: trade.entry_date, side: "buy", label: "매수",
-    price: trade.entry_price,
+    price: trade.entry_price, fraction: trade.position_fraction_of_sleeve ?? 1,
     reason: `${trade.signal_date} 종가 신호 · ${{
       RECOVERY_GAP: "하락 갭 시가 진입",
       RECOVERY_OPEN: "시가 돌파 진입",
       RECOVERY_BREAKOUT: "직전 고가 돌파 진입",
     }[trade.entry_basis] ?? "다음 거래일 시가 진입"}${status}`,
   });
-  const sellFills = (trade, id, legs) => legs.map((leg, i) => ({
+  const sellFills = (trade, id, legs, closed = true) => legs.map((leg, i) => ({
     id: `${id}-sell-${i}`, date: leg.exit_date, side: "sell",
-    label: leg.fraction < 1 ? `매도 ${leg.fraction * 100}%` : "매도",
+    label: "매도", fraction: leg.fraction ?? 1, final: closed && i === legs.length - 1,
     price: leg.exit_price, net: leg.net_return_pct,
     reason: `${trade.entry_date === leg.exit_date ? "당일 청산 · " : ""}${exits[leg.exit_reason] ?? leg.exit_reason}`,
   }));
@@ -249,10 +291,15 @@ function render() {
   if (scenario.open_position) {
     const position = scenario.open_position;
     fills.push(entryFill(position, "open-buy", ` · 종료일 미청산 · 평가 ${percent(position.marked_net_return_pct)}`),
-      ...sellFills(position, "open", position.exit_legs ?? []));
+      ...sellFills(position, "open", position.exit_legs ?? [], false));
   }
   fills.sort((a, b) => a.date.localeCompare(b.date));
-  metric("result", scenario.marked_net_sleeve_pct ?? scenario.compounded_net_sleeve_pct);
+  const account = applyAccount(fills, scenario.model, prices.at(-1).close);
+  fills = account.fills;
+  el("cash").textContent = cashFormat.format(account.cash);
+  el("holding").textContent = sharesText(account.holding);
+  el("holding-value").textContent = cashFormat.format(account.marketValue);
+  metric("result", account.returnPct);
   metric("benchmark", scenario.buyhold_close_to_close_pct);
   el("count").textContent = `${scenario.count}건`;
   el("win").textContent = scenario.win_rate_pct == null ? "—" : `${scenario.win_rate_pct.toFixed(0)}%`;
