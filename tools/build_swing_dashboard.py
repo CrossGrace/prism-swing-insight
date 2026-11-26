@@ -1,11 +1,14 @@
 """Build the read-only daily swing research dashboard."""
 
 import asyncio
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 import json
 from pathlib import Path
 import shutil
 import sys
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+from xml.etree import ElementTree
 from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,7 +20,51 @@ from swing_insight.watchlist import load_watchlist
 
 START = "2026-09-11"
 END = "2026-11-26"
+LAST_VERIFIED_STOCK_DAY = "2026-11-20"
 POLICY = ReplayPolicy(45, 2, 3, 5, 3, 10, 20, 10)
+
+
+def get_naver_stock_tail(ticker: str, start: str, end: str) -> dict:
+    queries = urlencode({
+        "symbol": ticker, "timeframe": "day", "requestType": 1,
+        "startTime": start.replace("-", ""), "endTime": end.replace("-", ""),
+    })
+    url = f"https://fchart.stock.naver.com/sise.nhn?{queries}"
+    with urlopen(Request(url, headers={"User-Agent": "PRISM-swing-insight-research/0.1"}),
+                 timeout=15) as response:
+        chart = ElementTree.fromstring(response.read()).find(".//chart")
+    if chart is None or chart.get("symbol") != ticker:
+        raise ValueError(f"Naver returned no matching stock chart: {ticker}")
+    rows = {}
+    for item in chart.findall("item"):
+        stamp, *values = item.attrib["data"].split("|")
+        day = date.fromisoformat(stamp).isoformat()
+        if not start <= day <= end or day in rows:
+            raise ValueError(f"Unexpected Naver trading date: {ticker} {day}")
+        o, h, l, c, v = map(float, values)
+        rows[day] = {"Open": o, "High": h, "Low": l, "Close": c, "Volume": v}
+    return rows
+
+
+async def get_stock_for_replay(ticker: str) -> tuple[dict, str]:
+    try:
+        return await get_public_research_ohlcv(ticker, END, start=START), "한국주식데이터"
+    except ValueError as exc:
+        if str(exc) != "PUBLIC_DAILY_PRICE_NOT_YET_AVAILABLE_FOR_END_DATE":
+            raise
+    historical = await get_public_research_ohlcv(ticker, LAST_VERIFIED_STOCK_DAY, start=START)
+    anchor = date.fromisoformat(LAST_VERIFIED_STOCK_DAY)
+    overlap_start = (anchor - timedelta(days=10)).isoformat()
+    tail = await asyncio.to_thread(get_naver_stock_tail, ticker, overlap_start, END)
+    overlap = [day for day in historical if overlap_start <= day <= anchor.isoformat()]
+    if LAST_VERIFIED_STOCK_DAY not in overlap or END not in tail or any(
+        day not in tail or any(float(historical[day][key]) != tail[day][key]
+                               for key in ("Open", "High", "Low", "Close"))
+        for day in overlap
+    ):
+        raise ValueError(f"Naver daily price overlap or end date could not be verified: {ticker}")
+    historical.update({day: row for day, row in tail.items() if day > LAST_VERIFIED_STOCK_DAY})
+    return historical, "한국주식데이터 · 11/23 이후 네이버 금융"
 
 
 async def build():
@@ -29,7 +76,7 @@ async def build():
     index = await get_public_research_kospi(END)
     instruments = []
     for item in watchlist:
-        stock = await get_public_research_ohlcv(item.ticker, END, start=START)
+        stock, price_source = await get_stock_for_replay(item.ticker)
         if END not in stock or END not in index or sorted(day for day in stock if START <= day <= END) != sorted(
             day for day in index if START <= day <= END
         ):
@@ -48,6 +95,7 @@ async def build():
         instruments.append({
             "ticker": item.ticker,
             "name": item.company,
+            "price_source": price_source,
             "prices": [
                 {"date": day, "close": stock[day]["Close"]}
                 for day in sorted(stock) if START <= day <= END
