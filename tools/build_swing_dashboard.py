@@ -27,8 +27,7 @@ POLICY = ReplayPolicy(45, 2, 3, 5, 3, 10, 20, 10)
 
 def get_naver_stock_tail(ticker: str, start: str, end: str) -> dict:
     queries = urlencode({
-        "symbol": ticker, "timeframe": "day", "requestType": 1,
-        "startTime": start.replace("-", ""), "endTime": end.replace("-", ""),
+        "symbol": ticker, "timeframe": "day", "requestType": 0, "count": 60,
     })
     url = f"https://fchart.stock.naver.com/sise.nhn?{queries}"
     with urlopen(Request(url, headers={"User-Agent": "PRISM-swing-insight-research/0.1"}),
@@ -36,14 +35,17 @@ def get_naver_stock_tail(ticker: str, start: str, end: str) -> dict:
         payload = response.read()
     declaration = re.match(rb"""<\?xml[^>]*encoding=["']([a-zA-Z0-9_-]+)["']""", payload, re.IGNORECASE)
     encoding = declaration[1].decode("ascii") if declaration else "utf-8-sig"
-    chart = ElementTree.fromstring(payload.decode(encoding)).find(".//chart")
-    if chart is None or chart.get("symbol") != ticker:
+    root = ElementTree.fromstring(payload.decode(encoding))
+    chart = root if root.tag == "chartdata" else root.find(".//chartdata")
+    if chart is None or chart.get("symbol", ticker) != ticker:
         raise ValueError(f"Naver returned no matching stock chart: {ticker}")
     rows = {}
-    for item in chart.findall("item"):
+    for item in chart.findall(".//item"):
         stamp, *values = item.attrib["data"].split("|")
         day = date.fromisoformat(stamp).isoformat()
-        if not start <= day <= end or day in rows:
+        if not start <= day <= end:
+            continue
+        if day in rows:
             raise ValueError(f"Unexpected Naver trading date: {ticker} {day}")
         o, h, l, c, v = map(float, values)
         rows[day] = {"Open": o, "High": h, "Low": l, "Close": c, "Volume": v}
